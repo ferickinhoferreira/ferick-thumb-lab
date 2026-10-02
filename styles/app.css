@@ -86,12 +86,12 @@ html.light #themeBtn .i-sun { display: block; }
 
 .brand { display: flex; align-items: center; gap: 6px; padding: 0 6px 0 2px; }
 .brand-mark {
-  width: 30px; height: 30px; border-radius: 9px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #fff; display: grid; place-items: center;
-  box-shadow: 0 4px 14px rgba(255, 43, 85, 0.35);
+  width: 32px; height: 32px; border-radius: 9px;
+  overflow: hidden; background: #0a1030;
+  display: grid; place-items: center; flex-shrink: 0;
+  box-shadow: 0 4px 14px rgba(30, 80, 255, 0.45);
 }
-.brand-mark svg { width: 20px; height: 20px; stroke-width: 2; }
+.brand-mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .brand-text { display: flex; flex-direction: column; line-height: 1; font-weight: 800; font-size: 15px; letter-spacing: -0.02em; }
 .brand-text small { font-weight: 500; font-size: 9.5px; color: var(--text-2); letter-spacing: 0.14em; text-transform: uppercase; }
 
