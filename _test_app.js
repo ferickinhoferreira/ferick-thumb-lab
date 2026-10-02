@@ -60,7 +60,7 @@ assert($('#viewRoot') && $('#viewRoot').innerHTML.includes('Home'), 'view home r
 assert($$('#viewRoot .card').length > 5, 'cards do feed presentes (' + $$('#viewRoot .card').length + ')');
 assert(!$('#viewRoot .card.reveal-own'), 'seu vídeo camuflado (sem destaque reveal-own)');
 assert(!$('#viewRoot .card.own'), 'sem classe own (sem contorno vermelho)');
-assert($('#viewRoot img[src*="thumbnails"]') || $('#viewRoot img').length > 0, 'imagens de thumbs no feed');
+assert($('#viewRoot img[src*="assets/rivals"]') || $('#viewRoot img').length > 0, 'imagens de thumbs no feed');
 assert($$('#chips .chip').length === 12, 'chips renderizados');
 
 // 2. Navegação por sidebar

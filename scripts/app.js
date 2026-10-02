@@ -39,9 +39,9 @@ const state = {
 
 const CHIPS = ['Todos', 'Shorts', 'Games', 'Design', 'Música', 'Tecnologia', 'Podcast', 'Ao vivo', 'Notícias', 'Filmes', 'Culinária', 'Viagens'];
 
-/* Thumbnails reais de concorrentes: imagens locais (100% offline, sem rede).
-   Pasta: "thumbnails que me chamam atenção" (ao lado de ferick-thumb-lab). */
-const RIVAL_THUMB_DIR = '../thumbnails que me chamam atenção';
+/* Thumbnails reais de concorrentes: imagens locais dentro do próprio projeto
+   (assets/rivals) — funciona em file://, localhost, GitHub Pages e Vercel. */
+const RIVAL_THUMB_DIR = './assets/rivals';
 const RIVAL_THUMB_FILES = [
   'asdadasd.jpeg', 'dasdfafgsa.jpeg', 'dfvfgf.jpeg', 'fafsafsa.jpeg', 'fafsfa.jpeg',
   'fdsfgafsafsa.jpeg', 'fsafasfa.jpeg', 'gcb vbmfyhd.jpeg', 'ghgvcncv.jpeg', 'gsdgdsgsd.jpeg',
