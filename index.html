@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark" style="color-scheme: dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ferick Thumb Lab — YouTube Thumbnail Preview</title>
+<meta name="description" content="Preview de thumbnail para YouTube: simule a home, o feed de Shorts, os resultados de busca e a pagina de watch em desktop, mobile e TV. Score de impacto, comparacao A/B e modo cego." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff2b55'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<!-- ======================= TOP BAR ======================= -->
+<header class="topbar">
+  <button class="icon-btn" id="menuBtn" title="Menu (M)" aria-label="Menu">
+    <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
+  </button>
+  <a class="brand" href="#" title="Ferick Thumb Lab">
+    <span class="brand-mark">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 7.5l6 4.5-6 4.5z" fill="currentColor" stroke="none"/></svg>
+    </span>
+    <span class="brand-text">Ferick<small>Thumb Lab</small></span>
+  </a>
+
+  <div class="search-wrap">
+    <div class="searchbar" id="searchBar">
+      <span class="search-leading" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      </span>
+      <input id="searchInput" type="text" placeholder="Pesquisar" autocomplete="off" />
+      <button class="search-clear" id="searchClear" title="Limpar" aria-label="Limpar busca">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+      <button class="search-btn" id="searchBtn" title="Pesquisar" aria-label="Pesquisar">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      </button>
+    </div>
+    <button class="icon-btn round" title="Pesquisar por voz (demo)" aria-label="Pesquisar por voz">
+      <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="icon-btn" id="shuffleBtn" title="Embaralhar feed (S)" aria-label="Embaralhar feed">
+      <svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20l17-17M21 16v5h-5M4 4l5 5M14 14l7 7"/></svg>
+    </button>
+    <button class="icon-btn" id="themeBtn" title="Alternar tema (D)" aria-label="Alternar tema">
+      <svg class="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+      <svg class="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+    </button>
+    <button class="ghost-btn" id="resetBtn" title="Restaurar padroes">
+      <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+      <span>Restaurar</span>
+    </button>
+    <button class="avatar" title="Voce" aria-label="Conta">FS</button>
+  </div>
+</header>
+<link rel="stylesheet" href="./styles/app.css" />
+</head>
+<body>
+
+<div class="app" id="app">
+  <!-- ======================= SIDEBAR ======================= -->
+  <aside class="sidebar" id="sidebar">
+    <nav class="side-nav">
+      <a class="side-item active" href="#" data-goto="home"><svg viewBox="0 0 24 24"><path d="M4 10.5 12 4l8 6.5V20H4z"/></svg><span>Inicio</span></a>
+      <a class="side-item" href="#" data-goto="shorts"><svg viewBox="0 0 24 24"><path d="M9 8.5 17 12l-8 3.5z"/><rect x="4" y="3" width="16" height="18" rx="5"/></svg><span>Shorts</span></a>
+      <a class="side-item" href="#" data-goto="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><span>Busca</span></a>
+      <a class="side-item" href="#" data-goto="watch"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5l5 2.5-5 2.5z"/></svg><span>Watch page</span></a>
+      <a class="side-item" href="#" data-goto="compare"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="7.5" height="14" rx="2"/><rect x="13.5" y="5" width="7.5" height="14" rx="2"/></svg><span>Comparar A/B</span></a>
+    </nav>
+
+    <div class="side-sub">Voce</div>
+    <nav class="side-nav">
+      <a class="side-item" href="#" data-goto="score"><svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M5 12H2M22 12h-3"/><circle cx="12" cy="12" r="5"/></svg><span>Score de impacto</span></a>
+      <a class="side-item" href="#" data-goto="upload"><svg viewBox="0 0 24 24"><path d="M12 16V5M7.5 9.5 12 5l4.5 4.5M4 19h16"/></svg><span>Upload</span></a>
+      <a class="side-item" href="#" data-goto="library"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 15l5-4 4 3 3-2 6 4"/></svg><span>Minha biblioteca</span></a>
+    </nav>
+
+    <div class="side-foot">
+      <p class="side-note">
+        <strong>Ferick Thumb Lab</strong><br />
+        Ferramenta 100% local: nenhuma imagem sai do seu navegador.
+      </p>
+    </div>
+  </aside>
+
+  <!-- ======================= MAIN ======================= -->
+  <main class="main" id="main">
+    <div class="chips" id="chips"></div>
+    <div id="viewRoot"></div>
+  </main>
+</div>
+
+<!-- ======================= FLOATING CONTROL DOCK ======================= -->
+<button class="fab" id="fabBtn" title="Painel de controle (P)" aria-label="Painel de controle">
+  <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.6l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 14a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.4 7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 17 4.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 10h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z"/></svg>
+</button>
+
+<aside class="control-dock" id="controlDock">
+  <div class="dock-head">
+    <h2>Painel de controle</h2>
+    <button class="icon-btn" id="dockClose" title="Fechar" aria-label="Fechar painel">
+      <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+
+  <div class="dock-body">
+    <section class="dock-section" id="sec-upload">
+      <h3><span class="dot"></span>Thumbnails</h3>
+      <div class="dropzone" id="dropzone">
+        <svg viewBox="0 0 24 24"><path d="M12 16V5M7.5 9.5 12 5l4.5 4.5M4 19h16"/></svg>
+        <p><strong>Arraste imagens</strong> aqui ou <label class="linkish">escolha do dispositivo<input type="file" id="fileInput" accept="image/*" multiple hidden /></label></p>
+        <p class="tiny">Tambem funciona: <kbd>Ctrl</kbd>+<kbd>V</kbd> para colar imagem ou link</p>
+      </div>
+      <div class="url-row">
+        <input id="urlInput" type="text" placeholder="ID/URL do YouTube ou URL da imagem" />
+        <button class="solid-btn sm" id="urlAddBtn">Adicionar</button>
+      </div>
+      <div class="lib" id="library"></div>
+      <div class="lib-actions">
+        <button class="ghost-btn sm" id="demoBtn">Carregar demo</button>
+        <button class="ghost-btn sm" id="clearBtn">Limpar tudo</button>
+      </div>
+    </section>
+
+    <section class="dock-section" id="sec-meta">
+      <h3><span class="dot"></span>Metadados do video</h3>
+      <label class="field"><span>Titulo</span><input id="fTitle" type="text" maxlength="120" /></label>
+      <label class="field"><span>Canal</span><input id="fChannel" type="text" maxlength="60" /></label>
+      <label class="field"><span>Views</span><input id="fViews" type="text" maxlength="40" /></label>
+      <label class="field"><span>Publicado</span><input id="fAge" type="text" maxlength="40" /></label>
+      <label class="field"><span>Duracao</span><input id="fDuration" type="text" maxlength="12" /></label>
+      <label class="field"><span>Texto no Short</span><input id="fShortTitle" type="text" maxlength="80" /></label>
+      <div class="field-grid">
+        <label class="field"><span>Palavra-chave</span><input id="fKeyword" type="text" maxlength="40" placeholder="destaque no titulo" /></label>
+        <label class="field"><span>Cor do destaque</span><input id="fKeywordColor" type="color" /></label>
+      </div>
+      <label class="field"><span>Escala do titulo <b id="titleScaleVal">100%</b></span>
+        <input id="fTitleScale" type="range" min="90" max="120" value="100" />
+      </label>
+    </section>
+
+    <section class="dock-section" id="sec-context">
+      <h3><span class="dot"></span>Contextos simulados</h3>
+      <div class="seg" id="segDevice">
+        <button data-val="desktop" class="active">Desktop</button>
+        <button data-val="mobile">Mobile</button>
+        <button data-val="tv">TV</button>
+      </div>
+      <div class="seg" id="segTabs">
+        <button data-val="home" class="active">Home</button>
+        <button data-val="shorts">Shorts</button>
+        <button data-val="search">Busca</button>
+        <button data-val="watch">Watch</button>
+      </div>
+      <div class="toggle-row">
+        <label class="switch"><input type="checkbox" id="tHideTitle" /><span></span>Ocultar titulo</label>
+        <label class="switch"><input type="checkbox" id="tHideMeta" /><span></span>Ocultar metadados</label>
+        <label class="switch"><input type="checkbox" id="tDimNeighbors" /><span></span>Escurecer concorrentes</label>
+        <label class="switch"><input type="checkbox" id="tIsolate" /><span></span>Isolar (fundo neutro)</label>
+      </div>
+    </section>
+
+    <section class="dock-section" id="sec-score">
+      <h3><span class="dot"></span>Score de impacto</h3>
+      <div class="score-wrap">
+        <div class="score-ring" id="scoreRing">
+          <svg viewBox="0 0 120 120">
+            <circle class="ring-bg" cx="60" cy="60" r="52" />
+            <circle class="ring-fg" id="scoreArc" cx="60" cy="60" r="52" />
+          </svg>
+          <div class="score-center">
+            <span id="scoreValue">--</span>
+            <small id="scoreGrade">sem thumb</small>
+          </div>
+        </div>
+        <ul class="score-metrics" id="scoreMetrics"></ul>
+      </div>
+      <p class="tiny">Analise local (brilho, contraste, saturacao, nitidez, regra dos tercos, rosto e texto). Nada e enviado para servidores.</p>
+    </section>
+
+    <section class="dock-section" id="sec-compare">
+      <h3><span class="dot"></span>Comparar A/B</h3>
+      <div class="ab-pick">
+        <label class="field"><span>Candidato A</span><select id="selA"></select></label>
+        <label class="field"><span>Candidato B</span><select id="selB"></select></label>
+      </div>
+      <button class="solid-btn" id="blindBtn">Teste cego</button>
+      <div class="blind-result" id="blindResult"></div>
+    </section>
+  </div>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+<div class="lightbox" id="lightbox"><img alt="preview" id="lightboxImg" /></div>
+
+<script src="./scripts/app.js"></script>
+</body>
+</html>
