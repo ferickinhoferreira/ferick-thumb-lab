@@ -238,6 +238,15 @@ body.no-sidebar .main { margin-left: 72px; }
   padding: 3px 8px; border-radius: 6px;
 }
 
+/* Escala real: a thumb do usuário é exibida nos px aproximados do YouTube
+   (ex.: 168px no "a seguir" do desktop), revelando se o texto some em leitura rápida. */
+.card.true-scale .thumb-shell.own-thumb { max-width: var(--own-w, 360px); margin: 0 auto; }
+.scale-tag {
+  display: table; margin: -6px auto 0; padding: 2px 8px;
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: 999px; font-size: 10.5px; font-weight: 600; color: var(--text-2);
+}
+
 .thumb-shell {
   position: relative; width: 100%; aspect-ratio: 16 / 9;
   border-radius: var(--radius); overflow: hidden; background: var(--bg-elev-2);
@@ -598,6 +607,21 @@ kbd { background: var(--bg-elev-2); border: 1px solid var(--border); border-radi
   background: var(--bg-elev); border: 1px solid var(--border); font-size: 13px; color: var(--text-2);
 }
 .verdict b { color: var(--text); }
+.score-error { font-size: 12px; color: #f5a623; line-height: 1.4; }
+
+/* Overlay de soltar imagens em qualquer lugar da página */
+.drop-overlay {
+  position: fixed; inset: 0; z-index: 350; display: none;
+  place-items: center; background: rgba(0, 0, 0, .72);
+  backdrop-filter: blur(2px);
+}
+.drop-overlay.show { display: grid; }
+.drop-overlay-inner {
+  text-align: center; color: #fff; border: 2px dashed rgba(255, 255, 255, .6);
+  border-radius: 16px; padding: 34px 48px;
+}
+.drop-overlay-inner svg { width: 44px; height: 44px; stroke: #fff; }
+.drop-overlay-inner p { margin: 12px 0 0; font-size: 15px; font-weight: 600; }
 
 /* ============================== LIBRARY / SCORE PAGES ============================== */
 .lib-page { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px; }
@@ -654,4 +678,28 @@ kbd { background: var(--bg-elev-2); border: 1px solid var(--border); border-radi
   .main { margin-left: 0; }
   .control-dock { width: 100%; }
   body.dock-open .main { margin-right: 0; }
+}
+
+/* ============================== A11Y ============================== */
+/* Link de pular navegação (visível apenas no foco por teclado) */
+.skip-link {
+  position: absolute; left: 12px; top: -60px; z-index: 400;
+  background: var(--accent); color: #fff; padding: 8px 14px;
+  border-radius: 8px; font-size: 13px; font-weight: 600;
+  transition: top .18s ease;
+}
+.skip-link:focus { top: 12px; }
+
+/* Foco visível consistente para navegação por teclado */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* Respeita quem prefere menos movimento */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .lightbox.open { display: grid; }
 }

@@ -29,15 +29,19 @@ const state = {
   hideMeta: false,
   dimNeighbors: false,    // desligado: todos os cards iguais (imersão real do YouTube)
   isolate: false,
+  trueScale: false,       // limita a thumb ativa aos px exibidos pelo YouTube
   revealOwn: false,       // tecla R: revela temporariamente onde seu vídeo está
   theme: 'dark',
   library: [],            // { id, name, src, title, channel, views, age, duration }
   activeId: null,
   compare: null,          // { a, aEntry, b, bEntry, winner } resultado do A/B
-  score: null
+  score: null,
+  scoreError: ''
 };
 
 const CHIPS = ['Todos', 'Shorts', 'Games', 'Design', 'Música', 'Tecnologia', 'Podcast', 'Ao vivo', 'Notícias', 'Filmes', 'Culinária', 'Viagens'];
+/* Categorias atribuídas aos vídeos do feed (usadas pelo filtro de chips). */
+const FEED_CATEGORIES = ['Games', 'Design', 'Música', 'Tecnologia', 'Podcast', 'Ao vivo', 'Notícias', 'Filmes', 'Culinária', 'Viagens'];
 
 /* Thumbnails reais de concorrentes: imagens locais dentro do próprio projeto
    (assets/rivals) — funciona em file://, localhost, GitHub Pages e Vercel. */
@@ -58,6 +62,7 @@ function rivalThumbURL(i) {
 /* Fallback global para <img> de concorrentes.
    data-fb="N" = índice do blueprint canvas correspondente.
    Chamado via onerror inline (funciona em file:// e http). */
+// eslint-disable-next-line no-unused-vars
 function thumbErrorHandler(img) {
   if (!img || img.dataset.fbDone) return;
   img.dataset.fbDone = '1';
@@ -114,6 +119,12 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const uid = () => Math.random().toString(36).slice(2, 10);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/* Normaliza uma cor para um formato seguro (#rgb, #rrggbb ou #rrggbbaa).
+   Evita injeção de CSS caso o valor venha de localStorage/editado à mão. */
+const safeColor = (v, fallback = '#ff2b55') => {
+  const s = String(v ?? '').trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s) ? s : fallback;
+};
 
 function hashCode(str) {
   let h = 0;
@@ -246,9 +257,13 @@ function makePlaceholderThumb() {
 /* ----------------------------- SCORE DE IMPACTO ----------------------------- */
 /* Heurística local: 6 métricas objetivas calculadas pixel a pixel no canvas.
    Tudo roda no navegador — nenhuma imagem é enviada para fora. */
-function analyzeThumb(src) {
-  return new Promise((resolve) => {
-    if (!src) return resolve(null);
+/* Cache de análises por src: evita recalcular a mesma imagem em refreshScore,
+   computeCompare e runBlindTest. Guarda a Promise para deduplicar chamadas. */
+const _scoreCache = new Map();
+function analyzeThumb(src, { fresh = false } = {}) {
+  if (!src) return Promise.resolve(null);
+  if (!fresh && _scoreCache.has(src)) return _scoreCache.get(src);
+  const p = new Promise((resolve) => {
     const img = new Image();
     if (!src.startsWith('data:')) img.crossOrigin = 'anonymous';
     img.onload = () => {
@@ -322,12 +337,22 @@ function analyzeThumb(src) {
         if (brightPx / n > 0.22) notes.push('Muito branco puro: em telas pequenas vira "luz estourada".');
         if (!notes.length) notes.push('Boa base! Teste variações de expressão/cor para subir mais.');
 
-        resolve({ score, metrics, notes });
-      } catch (err) { resolve(null); }
+        resolve({ score, metrics, notes, error: null });
+      } catch (err) {
+        // getImageData falha quando a imagem externa não envia cabeçalhos CORS.
+        resolve({ score: null, metrics: [], notes: [], error: 'cors' });
+      }
     };
-    img.onerror = () => resolve(null);
+    img.onerror = () => resolve({ score: null, metrics: [], notes: [], error: 'load' });
     img.src = src;
   });
+  _scoreCache.set(src, p);
+  return p;
+}
+
+/* Invalida o cache de uma imagem (ex.: ao removê-la da biblioteca). */
+function invalidateScore(src) {
+  if (src) _scoreCache.delete(src);
 }
 /* ----------------------------- FEED / DADOS ----------------------------- */
 function buildFeed(seedShift = 0) {
@@ -348,7 +373,8 @@ function buildFeed(seedShift = 0) {
       age: RIVAL_AGES[(i * 7 + seedShift) % RIVAL_AGES.length],
       duration: `${2 + Math.floor(rand() * 26)}:${String(Math.floor(rand() * 60)).padStart(2, '0')}`,
       thumb: rivalThumbURL(thumbIdx),
-      fb
+      fb,
+      category: FEED_CATEGORIES[(i + seedShift) % FEED_CATEGORIES.length]
     });
   }
   return items;
@@ -364,6 +390,7 @@ function userItem() {
     kind: 'video',
     id: 'user',
     own: true,
+    userFb: true,          // usa fallback próprio (placeholder) se a URL do usuário quebrar
     title: state.meta.title,
     channel: state.meta.channel || 'Seu canal',
     views: state.meta.views,
@@ -374,19 +401,12 @@ function userItem() {
   };
 }
 
-function shuffled(list, seedShift) {
-  const arr = list.slice();
-  const rand = rng(hashCode('shuffle-' + seedShift));
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
 function orderedFeed() {
-  const list = FEED.slice();
-  const userIdx = clamp(USER_POS, 0, list.length - 1);
+  // Filtro real pelo chip de categoria selecionado ("Todos" e "Shorts" não filtram).
+  const cat = state.chip && state.chip !== 'Todos' && state.chip !== 'Shorts' ? state.chip : null;
+  const base = cat ? FEED.filter((i) => i.category === cat) : FEED;
+  const list = (base.length ? base : FEED).slice();
+  const userIdx = clamp(USER_POS, 0, Math.max(0, list.length - 1));
   list.splice(userIdx, 0, userItem());
   return list;
 }
@@ -403,8 +423,9 @@ function titleHTML(text) {
   if (!kw) return esc(text);
   const idx = text.toLowerCase().indexOf(kw.toLowerCase());
   if (idx < 0) return esc(text);
+  const color = safeColor(state.meta.keywordColor, DEFAULT_META.keywordColor);
   return esc(text.slice(0, idx)) +
-    `<span class="kw" style="--kw-color:${state.meta.keywordColor}">${esc(text.slice(idx, idx + kw.length))}</span>` +
+    `<span class="kw" style="--kw-color:${color}">${esc(text.slice(idx, idx + kw.length))}</span>` +
     esc(text.slice(idx + kw.length));
 }
 
@@ -427,9 +448,13 @@ const ICON = {
 };
 
 function thumbShell(item, extraClass = '') {
-  const fb = item.fb != null ? ` data-fb="${item.fb}" onerror="thumbErrorHandler(this)"` : '';
+  const fb = item.fb != null
+    ? ` data-fb="${item.fb}" onerror="thumbErrorHandler(this)"`
+    : item.userFb
+      ? ` onerror="userThumbErrorHandler(this)"`
+      : '';
   return `<div class="thumb-shell ${extraClass}">
-      <img src="${item.thumb}" alt="${esc(item.title)}" loading="lazy" data-lightbox="${item.thumb}"${fb} />
+      <img src="${item.thumb}" alt="${esc(item.title)}" loading="lazy" data-lightbox="${item.thumb}" tabindex="0" role="button" aria-label="Ampliar thumbnail: ${esc(item.title)}"${fb} />
       ${state.hideTitle ? '' : `<span class="badge-dur">${esc(item.duration)}</span>`}
       <div class="thumb-tools">
         <button class="round-tool" title="Ver imagem" data-action="zoom" data-src="${item.thumb}">${ICON.expand}</button>
@@ -442,8 +467,13 @@ function videoCard(item) {
   // Sem classe "own": o vídeo do usuário se mistura aos demais (sem destaque visual).
   // A classe "reveal-own" só aparece com a tecla R (revelar posição).
   const own = item.own && state.revealOwn ? 'reveal-own' : '';
-  return `<article class="card ${own} ${dim}" data-id="${item.id}">
-      ${thumbShell(item)}
+  // Com "Escala real", a thumb do usuário é limitada aos px exibidos pelo YouTube.
+  const w = item.own && state.trueScale ? realThumbWidth(state.tab, state.device) : null;
+  const scale = w ? ` style="--own-w:${w}px"` : '';
+  const scaleTag = w ? `<span class="scale-tag">${w}px reais</span>` : '';
+  return `<article class="card ${own} ${dim}${w ? ' true-scale' : ''}" data-id="${item.id}"${scale}>
+      ${thumbShell(item, 'own-thumb')}
+      ${scaleTag}
       <div class="card-body">
         <div class="card-avatar">${esc(initials(item.channel))}</div>
         <div class="card-meta">
@@ -503,16 +533,25 @@ function viewShorts() {
 /* ----------------------------- VIEW: BUSCA ----------------------------- */
 function viewSearch() {
   const q = state.query.trim() || 'thumbnail';
-  const list = orderedFeed().filter((i) => i.kind === 'video').slice(0, 9);
-  const results = list.slice();
+  const needle = q.toLowerCase();
+  const all = orderedFeed();
+  // Filtro real por texto (título/canal) + sempre inclui o vídeo do usuário.
+  const rivals = all.filter((i) => !i.own);
+  const matched = rivals.filter((i) => (i.title + ' ' + i.channel).toLowerCase().includes(needle));
+  const base = (matched.length ? matched : rivals).slice(0, 9);
+  const results = base.slice();
   const ownIdx = clamp(USER_POS, 0, results.length);
   results.splice(ownIdx, 0, userItem());
+  const exact = matched.length;
+  const relevanceNote = exact
+    ? `Filtro aplicado: <b>${esc(q)}</b> · ${exact} resultado(s) por correspondência de texto`
+    : `Filtro aplicado: <b>${esc(q)}</b> · nenhuma correspondência exata — exibindo resultados aproximados`;
   return `
     <div class="view-head">
       <div><h1>Resultados de busca</h1><p>Como seu vídeo aparece quando alguém pesquisa</p></div>
       <span class="view-badge"><i></i>${results.length} resultados</span>
     </div>
-    <div class="search-query-note">Filtro aplicado: <b>${esc(q)}</b> · ordenado por relevância (simulado)</div>
+    <div class="search-query-note">${relevanceNote}</div>
     <div class="results">
       ${results.map((item) => `
         <article class="result ${item.own && state.revealOwn ? 'reveal-own' : ''}">
@@ -545,7 +584,7 @@ function viewWatch() {
     <div class="watch">
       <div>
         <div class="player">
-          <img src="${own.thumb}" alt="player" />
+          <img src="${own.thumb}" alt="player" onerror="userThumbErrorHandler(this)" />
           <div class="player-scrim"></div>
           <div class="player-center"><div class="pulse"><svg viewBox="0 0 24 24">${ICON.play.slice(12, -6)}</svg></div></div>
           <div class="player-bar">
@@ -637,7 +676,7 @@ function abColumn(tag, entry, analysis) {
   return `<div class="ab-col">
     <h3>Versão ${tag} ${isWinner ? '<span class="tag" style="color:#2ecc71">VENCEDORA</span>' : `<span class="tag">score ${score}</span>`}</h3>
     <div class="ab-card ${isWinner ? 'ab-winner' : ''}">
-      <div class="ab-thumb" data-lightbox="${entry.src}"><img src="${entry.src}" alt="Candidato ${tag}" /></div>
+      <div class="ab-thumb" data-lightbox="${entry.src}"><img src="${entry.src}" alt="Candidato ${tag}" onerror="userThumbErrorHandler(this)" /></div>
       ${state.hideTitle ? '' : `<h4 class="card-title" style="font-size:14px">${titleHTML((entry.title || state.meta.title) + ` (${tag})`)}</h4>`}
       <div class="ab-metrics">
         ${metrics.map((m) => `<div class="row"><span>${m.label}</span><b>${Math.round(m.value * 100)}</b></div>`).join('') || '<div class="row"><span>Aguardando análise…</span></div>'}
@@ -676,7 +715,7 @@ function viewLibrary() {
     <div class="lib-page">
       ${lib.map((t, i) => `
         <div class="tile">
-          <img src="${t.src}" alt="${esc(t.title)}" data-lightbox="${t.src}" />
+          <img src="${t.src}" alt="${esc(t.title)}" data-lightbox="${t.src}" loading="lazy" onerror="userThumbErrorHandler(this)" />
           <div class="tile-body">
             <h4>${esc(t.title || 'Sem título ' + (i + 1))}</h4>
             <p class="tiny">${t.id === state.activeId ? '✅ em uso no preview' : 'Fora do preview'}</p>
@@ -706,7 +745,7 @@ function viewScore() {
     </div>
     <div class="ab-grid">
       <div>
-        <div class="ab-thumb" data-lightbox="${active.src}" style="border-radius:14px"><img src="${active.src}" alt="thumb" /></div>
+        <div class="ab-thumb" data-lightbox="${active.src}" style="border-radius:14px"><img src="${active.src}" alt="thumb" onerror="userThumbErrorHandler(this)" /></div>
       </div>
       <div>
         <div class="score-wrap" style="margin-bottom:18px">
@@ -725,6 +764,9 @@ function viewScore() {
           <b>Dicas automáticas</b>
           <ul style="margin:8px 0 0;padding-left:18px">${a.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
         </div>
+        <div style="margin-top:16px">
+          <button class="solid-btn" data-action="export-report">Exportar relatório (PNG)</button>
+        </div>
       </div>
     </div>`;
 }
@@ -738,8 +780,26 @@ function emptyState(title, desc) {
   </div>`;
 }
 /* ----------------------------- HELPERS DE DEVICE ----------------------------- */
+/* Tamanhos aproximados (px) com que o YouTube exibe thumbnails por contexto.
+   Valores de referência do layout 2023–2025 (variam conforme a resolução);
+   usados para simular a escala real de leitura da thumb. */
+const YT_THUMB_SIZES = {
+  home:   { desktop: [360, 202], mobile: [375, 211], tv: [480, 270] },
+  search: { desktop: [360, 202], mobile: [160, 90],  tv: [360, 202] },
+  watch:  { desktop: [168, 94],  mobile: [375, 211], tv: [480, 270] }, // player + "a seguir"
+  shorts: { desktop: [160, 284], mobile: [220, 391], tv: [270, 480] }
+};
+/* Largura real (px) da thumb no contexto/dispositivo atual. */
+function realThumbWidth(tab, device) {
+  const t = YT_THUMB_SIZES[tab];
+  if (!t) return null;
+  const d = t[device] || t.desktop;
+  return d[0];
+}
 function deviceLabel() {
-  return { desktop: 'Desktop 1600px', mobile: 'Mobile 400px', tv: 'TV 1920px' }[state.device];
+  const base = { desktop: 'Desktop 1600px', mobile: 'Mobile 400px', tv: 'TV 1920px' }[state.device];
+  const w = realThumbWidth(state.tab, state.device);
+  return w ? `${base} · thumb exibida a ~${w}px` : base;
 }
 function cardMin() { return state.device === 'mobile' ? 148 : state.device === 'tv' ? 380 : 300; }
 function shortMin() { return state.device === 'mobile' ? 128 : state.device === 'tv' ? 230 : 175; }
@@ -816,14 +876,6 @@ function renderChips() {
 function bindViewEvents() {
   const root = $('#viewRoot');
   root.onclick = (e) => {
-    const chip = e.target.closest('.chip');
-    if (chip) {
-      state.chip = chip.dataset.chip;
-      state.chipLabel = state.chip === 'Todos' ? '' : state.chip;
-      FEED = buildFeed(hashCode(state.chip));
-      render();
-      return;
-    }
     const act = e.target.closest('[data-action]');
     if (act) {
       const a = act.dataset.action;
@@ -832,24 +884,58 @@ function bindViewEvents() {
       else if (a === 'use-thumb') setActive(act.dataset.id);
       else if (a === 'del-thumb') removeThumb(act.dataset.id);
       else if (a === 'open-dock') toggleDock(true);
+      else if (a === 'export-report') exportReport();
       return;
     }
     const zoomTarget = e.target.closest('[data-lightbox]');
     if (zoomTarget && !e.target.closest('[data-action]')) openLightbox(zoomTarget.dataset.lightbox);
   };
+  // Ativação por teclado (Enter/Espaço) dos alvos de lightbox
+  root.onkeydown = (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const zoomTarget = e.target.closest('[data-lightbox]');
+    if (!zoomTarget || e.target.closest('[data-action]')) return;
+    e.preventDefault();
+    openLightbox(zoomTarget.dataset.lightbox);
+  };
 }
 
+let _lightboxReturnFocus = null;
 function openLightbox(src) {
   if (!src) return;
+  const lb = $('#lightbox');
   $('#lightboxImg').src = src;
-  $('#lightbox').classList.add('open');
+  lb.classList.add('open');
+  // Acessibilidade: guarda o foco atual e move o foco para o diálogo.
+  _lightboxReturnFocus = document.activeElement;
+  lb.setAttribute('tabindex', '-1');
+  lb.focus();
 }
+
+function closeLightbox() {
+  const lb = $('#lightbox');
+  if (!lb.classList.contains('open')) return;
+  lb.classList.remove('open');
+  if (_lightboxReturnFocus && typeof _lightboxReturnFocus.focus === 'function') {
+    _lightboxReturnFocus.focus();
+  }
+  _lightboxReturnFocus = null;
+}
+/* Mensagem amigável para falhas na análise (CORS vs. imagem inválida). */
+function scoreErrorMessage(res) {
+  if (!res || res.error === 'load') return 'Não foi possível carregar a imagem para análise. Envie o arquivo em vez da URL.';
+  if (res.error === 'cors') return 'A imagem externa não permite leitura de pixels (CORS). Envie o arquivo para analisar.';
+  return '';
+}
+
 /* ----------------------------- PAINEL DE SCORE ----------------------------- */
 async function refreshScore() {
   const active = state.library.find((t) => t.id === state.activeId) || state.library[0];
   if (!active) { state.score = null; renderScorePanel(); return; }
-  state.score = await analyzeThumb(active.src);
-  active.score = state.score ? state.score.score : null;
+  const res = await analyzeThumb(active.src);
+  state.score = res && res.score != null ? res : null;
+  state.scoreError = res && res.score == null ? scoreErrorMessage(res) : '';
+  active.score = res && res.score != null ? res.score : null;
   renderScorePanel();
   saveLibrary();
   if (state.tab === 'score' || state.tab === 'library') render();
@@ -861,10 +947,12 @@ function renderScorePanel() {
   const a = state.score;
   if (!a) {
     val.textContent = '--';
-    grade.textContent = 'sem thumb';
+    grade.textContent = state.scoreError ? 'indisponível' : 'sem thumb';
     arc.style.strokeDashoffset = 327;
     ring.className = 'score-ring';
-    list.innerHTML = '';
+    list.innerHTML = state.scoreError
+      ? `<li class="score-error">${esc(state.scoreError)}</li>`
+      : '';
     return;
   }
   val.textContent = a.score;
@@ -875,9 +963,169 @@ function renderScorePanel() {
     `<li>${m.label}<span class="m-bar"><i style="width:${Math.round(m.value * 100)}%"></i></span><b>${Math.round(m.value * 100)}</b></li>`).join('');
 }
 
+/* ----------------------------- EXPORTAR RELATÓRIO ----------------------------- */
+/* Gera um PNG (1200×675 aprox.) com a thumbnail + score + métricas + dicas,
+   tudo desenhado em canvas (100% local, sem servidor). Dispara o download. */
+async function exportReport() {
+  const active = state.library.find((t) => t.id === state.activeId) || state.library[0];
+  if (!active) { toast('Envie uma thumbnail antes de exportar.', 'warn'); return; }
+  toast('Gerando relatório…');
+
+  const a = state.score || await analyzeThumb(active.src);
+  if (!a || a.score == null) { toast('Não foi possível analisar para o relatório.', 'warn'); return; }
+
+  try {
+    const W = 1200, H = 760;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+
+    // Fundo
+    g.fillStyle = '#0f0f0f';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = '#ff2b55';
+    g.fillRect(0, 0, W, 8);
+
+    // Cabeçalho
+    g.fillStyle = '#f1f1f1';
+    g.font = '700 34px Roboto, Arial, sans-serif';
+    g.textAlign = 'left';
+    g.fillText('Ferick Thumb Lab — Relatório de impacto', 48, 72);
+    g.fillStyle = '#909090';
+    g.font = '400 16px Roboto, Arial, sans-serif';
+    g.fillText(new Date().toLocaleString('pt-BR'), 48, 100);
+
+    // Thumbnail (16:9)
+    const img = await loadImage(active.src).catch(() => null);
+    const tw = 520, th = 292, tx = 48, ty = 140;
+    g.fillStyle = '#1c1c1c';
+    g.fillRect(tx, ty, tw, th);
+    if (img) {
+      g.save();
+      g.beginPath(); g.rect(tx, ty, tw, th); g.clip();
+      drawCover(g, img, tx, ty, tw, th);
+      g.restore();
+    }
+    g.strokeStyle = 'rgba(255,255,255,.12)';
+    g.lineWidth = 2;
+    g.strokeRect(tx + 1, ty + 1, tw - 2, th - 2);
+
+    g.fillStyle = '#f1f1f1';
+    g.font = '600 20px Roboto, Arial, sans-serif';
+    g.fillText(truncate(g, (active.title || 'Thumbnail'), tw), tx, ty + th + 40);
+    g.fillStyle = '#909090';
+    g.font = '400 15px Roboto, Arial, sans-serif';
+    g.fillText(truncate(g, (state.meta.channel || 'Seu canal') + ' · ' + (state.meta.title || ''), tw), tx, ty + th + 66);
+
+    // Score grande
+    const sx = 640;
+    g.fillStyle = ringColor(a.score);
+    g.font = '800 96px Roboto, Arial, sans-serif';
+    g.fillText(String(a.score), sx, ty + 96);
+    g.fillStyle = '#f1f1f1';
+    g.font = '600 22px Roboto, Arial, sans-serif';
+    g.fillText(gradeLabel(a.score), sx, ty + 136);
+
+    // Métricas com barras
+    let my = ty + 180;
+    g.font = '500 16px Roboto, Arial, sans-serif';
+    a.metrics.forEach((m) => {
+      const val = Math.round(m.value * 100);
+      g.fillStyle = '#aaaaaa';
+      g.textAlign = 'left';
+      g.fillText(m.label, sx, my);
+      // barra
+      const barX = sx + 180, barW = 300;
+      g.fillStyle = '#303030';
+      g.fillRect(barX, my - 13, barW, 14);
+      g.fillStyle = ringColor(val);
+      g.fillRect(barX, my - 13, barW * (val / 100), 14);
+      g.fillStyle = '#f1f1f1';
+      g.textAlign = 'right';
+      g.fillText(String(val), barX + barW + 40, my);
+      g.textAlign = 'left';
+      my += 44;
+    });
+
+    // Dicas
+    let dy = ty + th + 120;
+    g.fillStyle = '#f1f1f1';
+    g.font = '600 18px Roboto, Arial, sans-serif';
+    g.fillText('Dicas automáticas', 48, dy);
+    g.font = '400 15px Roboto, Arial, sans-serif';
+    g.fillStyle = '#aaaaaa';
+    (a.notes || []).slice(0, 6).forEach((n) => {
+      dy += 26;
+      if (dy < H - 40) g.fillText('• ' + n, 56, dy);
+    });
+
+    // Rodapé
+    g.fillStyle = '#717171';
+    g.font = '400 13px Roboto, Arial, sans-serif';
+    g.fillText('Análise 100% local — nenhum dado sai do seu navegador.', 48, H - 28);
+
+    // Download
+    const url = c.toDataURL('image/png');
+    triggerDownload(url, `ferick-relatorio-${a.score}.png`);
+    toast('Relatório PNG exportado.', 'good');
+  } catch (err) {
+    toast('Falha ao gerar o relatório.', 'warn');
+  }
+}
+
+/* Carrega uma imagem (data:, http:, file:) como Promise. */
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    if (!src.startsWith('data:')) im.crossOrigin = 'anonymous';
+    im.onload = () => resolve(im);
+    im.onerror = reject;
+    im.src = src;
+  });
+}
+
+/* Desenha a imagem cobrindo a área (object-fit: cover). */
+function drawCover(g, img, x, y, w, h) {
+  const ir = img.width / img.height, tr = w / h;
+  let sw, sh, sx, sy;
+  if (ir > tr) { sh = img.height; sw = sh * tr; sx = (img.width - sw) / 2; sy = 0; }
+  else { sw = img.width; sh = sw / tr; sx = 0; sy = (img.height - sh) / 2; }
+  g.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+}
+
+function ringColor(score) {
+  return score >= 75 ? '#2ecc71' : score >= 50 ? '#f5a623' : '#ff2b55';
+}
+
+function truncate(g, text, maxW) {
+  if (g.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && g.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+
+/* Dispara o download de um data URL. */
+function triggerDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 /* ----------------------------- BIBLIOTECA / UPLOAD ----------------------------- */
 // Nota: makeRivalThumb (canvas) continua disponível como gerador de fallback
 // e é usado pelo botão "Carregar demo" para criar variações A/B sintéticas.
+/* Fallback para imagens do usuário (URL externa quebrada ou sem permissão).
+   Substitui por um placeholder gerado no canvas — evita ícone de imagem quebrada. */
+// eslint-disable-next-line no-unused-vars
+function userThumbErrorHandler(img) {
+  if (!img || img.dataset.fbDone) return;
+  img.dataset.fbDone = '1';
+  try { img.src = makePlaceholderThumb(); } catch (err) { /* sem canvas: mantém alt */ }
+}
+
 function renderLibrary() {
   const box = $('#library');
   if (!state.library.length) {
@@ -886,7 +1134,7 @@ function renderLibrary() {
   }
   box.innerHTML = state.library.map((t) => `
     <div class="lib-item ${t.id === state.activeId ? 'active' : ''}" data-id="${t.id}" title="${esc(t.title || 'thumb')}">
-      <img src="${t.src}" alt="${esc(t.title)}" />
+      <img src="${t.src}" alt="${esc(t.title)}" loading="lazy" onerror="userThumbErrorHandler(this)" />
       <button class="lib-del" data-del="${t.id}" title="Remover">${ICON.close}</button>
     </div>`).join('');
 }
@@ -916,6 +1164,8 @@ function setActive(id, skipRender) {
 }
 
 function removeThumb(id) {
+  const removed = state.library.find((t) => t.id === id);
+  if (removed) invalidateScore(removed.src);
   state.library = state.library.filter((t) => t.id !== id);
   if (state.activeId === id) state.activeId = state.library[0] ? state.library[0].id : null;
   saveLibrary();
@@ -950,15 +1200,25 @@ function syncSelects() {
 const STORE_KEY = 'ferick-thumb-lab-v1';
 
 function saveLibrary() {
+  const buildPayload = (list) => JSON.stringify({
+    meta: state.meta,
+    activeId: state.activeId,
+    theme: state.theme,
+    library: list.slice(0, 12).map((t) => ({ ...t }))
+  });
   try {
-    const payload = {
-      meta: state.meta,
-      activeId: state.activeId,
-      theme: state.theme,
-      library: state.library.slice(0, 12).map((t) => ({ ...t }))
-    };
-    localStorage.setItem(STORE_KEY, JSON.stringify(payload));
-  } catch (err) { /* quota: ignora silenciosamente */ }
+    localStorage.setItem(STORE_KEY, buildPayload(state.library));
+  } catch (err) {
+    // QuotaExceededError: tenta salvar menos itens antes de desistir.
+    if (err && (err.name === 'QuotaExceededError' || err.code === 22)) {
+      try {
+        localStorage.setItem(STORE_KEY, buildPayload(state.library.slice(0, 4)));
+        toast('Espaço local cheio: apenas as 4 thumbnails mais recentes foram salvas.', 'warn');
+      } catch (err2) {
+        toast('Não foi possível salvar no navegador (espaço cheio). Sua sessão continua ativa.', 'warn');
+      }
+    }
+  }
 }
 
 function loadLibrary() {
@@ -984,12 +1244,41 @@ function fileToDataURL(file) {
   });
 }
 
+/* Redimensiona/reencoda uma imagem para caber confortavelmente no localStorage.
+   Mantém a proporção 16:9 e limita a largura a maxW. Se o canvas falhar,
+   devolve o data URL original (nunca quebra o upload). */
+function compressImage(dataURL, maxW = 1280) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        if (img.width <= maxW) return resolve(dataURL);
+        const scale = maxW / img.width;
+        const W = Math.round(img.width * scale);
+        const H = Math.round(img.height * scale);
+        const c = document.createElement('canvas');
+        c.width = W; c.height = H;
+        const g = c.getContext('2d');
+        if (!g) return resolve(dataURL);
+        g.drawImage(img, 0, 0, W, H);
+        const out = c.toDataURL('image/jpeg', 0.85);
+        // Só usa a versão comprimida se ela for realmente menor.
+        resolve(out && out.length < dataURL.length ? out : dataURL);
+      } catch (err) { resolve(dataURL); }
+    };
+    img.onerror = () => resolve(dataURL);
+    img.src = dataURL;
+  });
+}
+
 async function handleFiles(files) {
   const imgs = Array.from(files).filter((f) => f.type.startsWith('image/'));
   if (!imgs.length) { toast('Nenhuma imagem válida selecionada.', 'warn'); return; }
+  if (imgs.length > 1) toast('Processando ' + imgs.length + ' imagens…');
   for (const f of imgs) {
     try {
-      const url = await fileToDataURL(f);
+      let url = await fileToDataURL(f);
+      url = await compressImage(url, 1280);
       addThumb(url, { title: f.name.replace(/\.[^.]+$/, ''), duration: state.meta.duration });
     } catch (err) { toast('Falha ao ler ' + f.name, 'warn'); }
   }
@@ -1027,14 +1316,18 @@ async function runBlindTest() {
   box.innerHTML = 'Analisando as duas versões…';
   const ra = await analyzeThumb(a.src);
   const rb = await analyzeThumb(b.src);
-  if (!ra || !rb) { box.innerHTML = 'Não foi possível analisar as imagens.'; return; }
+  if (!ra || ra.score == null || !rb || rb.score == null) {
+    box.innerHTML = scoreErrorMessage(ra && ra.score == null ? ra : rb) || 'Não foi possível analisar as imagens.';
+    return;
+  }
   const winner = ra.score >= rb.score ? 'A' : 'B';
   state.compare = { a: ra, aEntry: a.id, b: rb, bEntry: b.id, winner };
   box.innerHTML = `Modo cego: as duas foram avaliadas pelo mesmo critério.<br/>
     <b>Versão ${winner}</b> leva vantagem (${Math.max(ra.score, rb.score)} vs ${Math.min(ra.score, rb.score)}).<br/>
     <span class="tiny">Confie na sua leitura também: a decisão final é sempre do seu público.</span>`;
-  if (state.tab !== 'compare') { state.tab = 'compare'; document.body.classList.remove('dock-open'); }
+  if (state.tab !== 'compare') { state.tab = 'compare'; syncHash('compare', false); document.body.classList.remove('dock-open'); }
   render();
+  $$('.side-item').forEach((el) => el.classList.toggle('active', el.dataset.goto === 'compare'));
 }
 
 async function computeCompare() {
@@ -1044,7 +1337,11 @@ async function computeCompare() {
   const b = lib.find((t) => t.id === $('#selB').value) || lib[1];
   const ra = await analyzeThumb(a.src);
   const rb = await analyzeThumb(b.src);
-  if (!ra || !rb) return;
+  if (!ra || ra.score == null || !rb || rb.score == null) {
+    const vb = $('#verdictBox');
+    if (vb) vb.innerHTML = esc(scoreErrorMessage(ra && ra.score == null ? ra : rb) || 'Não foi possível analisar as imagens.');
+    return;
+  }
   state.compare = { a: ra, aEntry: a.id, b: rb, bEntry: b.id, winner: ra.score >= rb.score ? 'A' : 'B' };
   const vb = $('#verdictBox');
   if (vb) vb.innerHTML = verdictHTML();
@@ -1077,18 +1374,73 @@ function applyTheme() {
 function toggleDock(open) {
   const on = open === undefined ? !document.body.classList.contains('dock-open') : open;
   document.body.classList.toggle('dock-open', on);
+  const dock = $('#controlDock');
+  const fab = $('#fabBtn');
+  if (fab) fab.setAttribute('aria-expanded', on ? 'true' : 'false');
+  if (dock) dock.setAttribute('aria-hidden', on ? 'false' : 'true');
+  if (on) {
+    // Move o foco para o painel (diálogo) e guarda o elemento de origem.
+    _dockReturnFocus = document.activeElement;
+    const first = dock.querySelector('button, [href], input, select, textarea');
+    if (first) { try { first.focus(); } catch (err) { /* noop */ } }
+  } else {
+    // Devolve o foco ao FAB (ou a quem abriu) ao fechar.
+    const target = (_dockReturnFocus && _dockReturnFocus.focus) ? _dockReturnFocus : $('#fabBtn');
+    _dockReturnFocus = null;
+    if (target) { try { target.focus(); } catch (err) { /* noop */ } }
+  }
+}
+let _dockReturnFocus = null;
+
+/* Anuncia a seleção dos segmentos (device/tabs) para leitores de tela. */
+function syncSegAria() {
+  $$('#segDevice button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.val === state.device ? 'true' : 'false'));
+  $$('#segTabs button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.val === state.tab ? 'true' : 'false'));
 }
 
 function scrollTop() { window.scrollTo({ top: 0, behavior: 'smooth' }); }
 
-function goto(section) {
+/* Sincroniza a aba atual com o hash da URL (#/home, #/score, #/search?q=…)
+   para permitir compartilhar links e usar os botões voltar/avançar. */
+const TAB_SLUGS = ['home', 'shorts', 'search', 'watch', 'compare', 'library', 'score'];
+function tabFromHash() {
+  const raw = (location.hash || '').replace(/^#\/?/, '');
+  const slug = raw.split('?')[0].split('/')[0];
+  return TAB_SLUGS.includes(slug) ? slug : null;
+}
+/* Extrai o termo de busca (?q=…) do hash atual, se houver. */
+function queryFromHash() {
+  const raw = (location.hash || '');
+  const q = raw.indexOf('?') >= 0 ? new URLSearchParams(raw.slice(raw.indexOf('?') + 1)).get('q') : null;
+  return q ? q.slice(0, 80) : null;
+}
+/* Monta o hash de uma seção, incluindo a query da busca quando aplicável. */
+function hashFor(section) {
+  if (section === 'search') {
+    const q = (state.query || '').trim();
+    return q && q !== 'thumbnail' ? '#/search?q=' + encodeURIComponent(q) : '#/search';
+  }
+  return '#/' + section;
+}
+function syncHash(section, replace) {
+  const next = hashFor(section);
+  if (location.hash === next) return;
+  try {
+    if (replace) history.replaceState({ tab: section }, '', next);
+    else history.pushState({ tab: section }, '', next);
+  } catch (err) { /* ambientes sem history (file://) — ignora */ }
+}
+
+function goto(section, { push = true } = {}) {
   if (section === 'upload') { toggleDock(true); flashSection('#sec-upload'); return; }
-  if (!['home', 'shorts', 'search', 'watch', 'compare', 'library', 'score'].includes(section)) return;
+  if (!TAB_SLUGS.includes(section)) return;
   state.tab = section;
-  document.body.classList.remove('dock-open');
+  syncHash(section, !push);
+  toggleDock(false); // fecha o painel e restaura aria/foco
   render();
   scrollTop();
   $$('.side-item').forEach((el) => el.classList.toggle('active', el.dataset.goto === section));
+  syncSegAria();
 }
 
 function flashSection(sel) {
@@ -1122,6 +1474,7 @@ function resetAll() {
   state.hideMeta = false;
   state.dimNeighbors = false;
   state.isolate = false;
+  state.trueScale = false;
   state.revealOwn = false;
   FEED = buildFeed(0);
   syncFormFromState();
@@ -1145,6 +1498,7 @@ function syncFormFromState() {
   $('#tHideMeta').checked = state.hideMeta;
   $('#tDimNeighbors').checked = state.dimNeighbors;
   $('#tIsolate').checked = state.isolate;
+  $('#tTrueScale').checked = state.trueScale;
   document.documentElement.style.setProperty('--title-size', (15 * state.meta.titleScale / 100).toFixed(2) + 'px');
   $$('#segDevice button').forEach((b) => b.classList.toggle('active', b.dataset.val === state.device));
   $$('#segTabs button').forEach((b) => b.classList.toggle('active', b.dataset.val === state.tab));
@@ -1176,6 +1530,7 @@ function bindUI() {
   const doSearch = () => {
     state.query = $('#searchInput').value.trim() || 'thumbnail';
     state.tab = 'search';
+    syncHash('search', false);
     render();
     scrollTop();
   };
@@ -1220,19 +1575,42 @@ function bindUI() {
   $('#tHideMeta').addEventListener('change', (e) => { state.hideMeta = e.target.checked; renderPreviewOnly(); });
   $('#tDimNeighbors').addEventListener('change', (e) => { state.dimNeighbors = e.target.checked; renderPreviewOnly(); });
   $('#tIsolate').addEventListener('change', (e) => { state.isolate = e.target.checked; render(); });
+  $('#tTrueScale').addEventListener('change', (e) => {
+    state.trueScale = e.target.checked;
+    renderPreviewOnly();
+    if (state.trueScale) {
+      const w = realThumbWidth(state.tab, state.device);
+      if (w) toast(`Modo escala real: sua thumb exibida a ~${w}px (como no YouTube).`);
+    }
+  });
 
   $('#segDevice').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     state.device = b.dataset.val;
     $$('#segDevice button').forEach((x) => x.classList.toggle('active', x === b));
+    syncSegAria();
     render();
   });
   $('#segTabs').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     state.tab = b.dataset.val;
+    syncHash(state.tab, false);
     $$('#segTabs button').forEach((x) => x.classList.toggle('active', x === b));
+    syncSegAria();
     render();
     scrollTop();
+  });
+
+  // Filtro de chips (categorias) — o container #chips fica fora de #viewRoot,
+  // por isso o handler é delegado aqui, não em bindViewEvents.
+  $('#chips').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    state.chip = chip.dataset.chip;
+    state.chipLabel = state.chip === 'Todos' ? '' : state.chip;
+    render();
+    const n = $$('#viewRoot .card').length;
+    toast(state.chip === 'Todos' ? 'Mostrando todos os vídeos.' : `Filtrando por “${state.chip}” (${n} vídeos).`);
   });
 
   bindUploadUI();
@@ -1253,6 +1631,31 @@ function bindUploadUI() {
     dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('dragover'); }));
   dz.addEventListener('drop', (e) => {
     if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
+
+  // Soltar imagens em qualquer lugar da página (overlay de página inteira)
+  const overlay = $('#dropOverlay');
+  let dragDepth = 0;
+  const hasFiles = (e) => Array.from((e.dataTransfer && e.dataTransfer.types) || []).includes('Files');
+  window.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth++;
+    if (overlay) overlay.classList.add('show');
+  });
+  window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragleave', (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0 && overlay) overlay.classList.remove('show');
+  });
+  window.addEventListener('drop', (e) => {
+    dragDepth = 0;
+    if (overlay) overlay.classList.remove('show');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      e.preventDefault();
+      handleFiles(e.dataTransfer.files);
+    }
   });
 
   $('#urlAddBtn').addEventListener('click', addFromUrl);
@@ -1296,7 +1699,7 @@ function bindCompareUI() {
 /* ----------------------------- COLAR / TECLADO / LIGHTBOX / SCROLL ----------------------------- */
 function bindKeyboardAndPaste() {
   // Lightbox
-  $('#lightbox').addEventListener('click', () => $('#lightbox').classList.remove('open'));
+  $('#lightbox').addEventListener('click', closeLightbox);
 
   // Colar imagem ou link do YouTube
   document.addEventListener('paste', (e) => {
@@ -1327,6 +1730,27 @@ function bindKeyboardAndPaste() {
     document.documentElement.classList.toggle('scrolled', window.scrollY > 4);
   }, { passive: true });
 
+  // Navegação por hash (voltar/avançar do navegador)
+  window.addEventListener('popstate', () => {
+    const tab = tabFromHash() || 'home';
+    if (tab !== state.tab) goto(tab, { push: false });
+  });
+
+  // Focus trap: enquanto o painel está aberto, Tab circula só dentro dele.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    if (!document.body.classList.contains('dock-open')) return;
+    const dock = $('#controlDock');
+    if (!dock) return;
+    const focusables = dock.querySelectorAll('button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])');
+    if (!focusables.length) return;
+    const first = focusables[0], last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !dock.contains(active)) { e.preventDefault(); last.focus(); }
+    } else if (active === last || !dock.contains(active)) { e.preventDefault(); first.focus(); }
+  });
+
   // Atalhos: D=tema, P=painel, M=menu, S=embaralhar, R=revelar posição, Esc=lightbox
   document.addEventListener('keydown', (e) => {
     const tag = (e.target && e.target.tagName || '').toLowerCase();
@@ -1354,7 +1778,7 @@ function bindKeyboardAndPaste() {
       render();
       toast(state.revealOwn ? 'Revelando onde seu vídeo está…' : 'Posição oculta novamente.', state.revealOwn ? 'warn' : '');
     } else if (e.key === 'Escape') {
-      $('#lightbox').classList.remove('open');
+      closeLightbox();
       if (document.body.classList.contains('dock-open')) toggleDock(false);
     }
   });
@@ -1363,17 +1787,38 @@ function bindKeyboardAndPaste() {
 
 /* ----------------------------- INIT ----------------------------- */
 function init() {
-  const restored = loadLibrary();
+  loadLibrary(); // restaura tema/meta/biblioteca persistidos (por efeito colateral)
   FEED = buildFeed(0);
   rerollUserPosition(); // sorteia onde o vídeo do usuário entra no feed
+  const hasStoredPrefs = !!localStorage.getItem(STORE_KEY);
+
+  // Aba inicial: o hash da URL (#/score, #/search?q=…) vale mesmo em navegação
+  // anônima / primeira visita (compartilhamento de link deve funcionar sempre).
+  const fromHash = tabFromHash();
+  if (fromHash) state.tab = fromHash;
+  const qFromHash = queryFromHash();
+  if (qFromHash && state.tab === 'search') {
+    state.query = qFromHash;
+    $('#searchInput').value = qFromHash;
+    $('#searchClear').classList.add('show');
+  }
+
+  // Tema inicial: respeita a preferência do sistema se o usuário nunca escolheu
+  // (nenhuma escolha persistida no localStorage = primeira visita real).
+  if (!hasStoredPrefs && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+    state.theme = 'light';
+  }
 
   applyTheme();
   syncFormFromState();
   bindUI();
+  syncHash(state.tab, true);
 
   // Estado inicial dos segmentos (seguindo o estado real)
   $$('#segDevice button').forEach((b) => b.classList.toggle('active', b.dataset.val === state.device));
   $$('#segTabs button').forEach((b) => b.classList.toggle('active', b.dataset.val === state.tab));
+  $$('.side-item').forEach((el) => el.classList.toggle('active', el.dataset.goto === state.tab));
+  syncSegAria(); // anuncia a seleção dos segmentos para leitores de tela
 
   render();
 
@@ -1381,7 +1826,7 @@ function init() {
   if (state.activeId) refreshScore();
 
   // Mostra o dock automaticamente na primeira visita
-  if (!localStorage.getItem(STORE_KEY)) {
+  if (!hasStoredPrefs) {
     setTimeout(() => toggleDock(true), 500);
   }
 }

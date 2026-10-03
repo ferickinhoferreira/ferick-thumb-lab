@@ -1,0 +1,17 @@
+{
+  "name": "ferick-thumb-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ferramenta estática (zero build) para preview de thumbnails do YouTube.",
+  "scripts": {
+    "test": "node _test_app.js",
+    "lint": "eslint scripts/app.js _test_app.js",
+    "format": "prettier --write \"scripts/**/*.js\" \"styles/**/*.css\" \"*.html\" \"_test_app.js\"",
+    "serve": "npx --yes serve ."
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0",
+    "jsdom": "^30.1.1"
+  }
+}

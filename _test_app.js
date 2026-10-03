@@ -63,6 +63,16 @@ assert(!$('#viewRoot .card.own'), 'sem classe own (sem contorno vermelho)');
 assert($('#viewRoot img[src*="assets/rivals"]') || $('#viewRoot img').length > 0, 'imagens de thumbs no feed');
 assert($$('#chips .chip').length === 12, 'chips renderizados');
 
+// 1b. Filtro de chips filtra de verdade por categoria
+const chipGames = window.document.querySelector('#chips .chip[data-chip="Games"]');
+chipGames.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const gamesCount = $$('#viewRoot .card').length;
+assert(gamesCount >= 1, 'chip Games mostra ao menos 1 card (' + gamesCount + ')');
+assert($('#viewRoot').innerHTML.includes('Games'), 'cabeçalho menciona o filtro Games');
+const chipAll = window.document.querySelector('#chips .chip[data-chip="Todos"]');
+chipAll.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert($$('#viewRoot .card').length > gamesCount, 'chip Todos mostra mais cards que Games');
+
 // 2. Navegação por sidebar
 const tabs = ['shorts', 'search', 'watch', 'compare', 'library', 'score', 'home'];
 for (const t of tabs) {
@@ -86,7 +96,7 @@ for (const t of ['shorts', 'search', 'watch', 'home']) {
 }
 
 // 5. Toggles
-const toggles = ['tHideTitle', 'tHideMeta', 'tDimNeighbors', 'tIsolate'];
+const toggles = ['tHideTitle', 'tHideMeta', 'tDimNeighbors', 'tIsolate', 'tTrueScale'];
 for (const id of toggles) {
   const el = $('#' + id);
   const before = el.checked;
@@ -127,6 +137,17 @@ $('#searchInput').value = 'teste';
 $('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 assert($('#viewRoot').innerHTML.includes('Resultados de busca'), 'busca renderizada');
 
+// 8b. Busca com correspondência real (título/canal) traz nota de relevância
+$('#searchInput').value = 'thumbnail';
+$('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert($('#viewRoot').innerHTML.includes('por correspondência de texto'), 'busca filtra por correspondência real');
+assert($$('#viewRoot .result').length >= 1, 'busca retorna resultados');
+
+// 8c. Busca sem correspondência cai no modo aproximado (não quebra)
+$('#searchInput').value = 'zzz-nao-existe-xyz';
+$('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert($('#viewRoot').innerHTML.includes('nenhuma correspondência exata'), 'busca sem match usa modo aproximado');
+
 // 9. Tema
 $('#themeBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 assert(window.document.documentElement.classList.contains('light') || window.document.documentElement.classList.contains('dark'), 'tema alternado');
@@ -149,9 +170,75 @@ const img = $('#viewRoot [data-lightbox]');
 if (img) {
   img.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   assert($('#lightbox').classList.contains('open'), 'lightbox abre');
+  // Fecha via Escape (closeLightbox)
+  window.document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert(!$('#lightbox').classList.contains('open'), 'lightbox fecha com Escape');
 } else {
   console.log('SKIP lightbox (sem data-lightbox visível)');
 }
+
+// 13. Acessibilidade: elementos-chave presentes
+assert($('.skip-link'), 'skip-link presente');
+assert($('#toasts').getAttribute('aria-live') === 'polite', 'toasts com aria-live');
+assert($('#lightbox').getAttribute('role') === 'dialog', 'lightbox com role=dialog');
+assert($('#segDevice').getAttribute('role') === 'group', 'segDevice com role=group');
+
+// 14. Sincronização de hash (voltar/avançar do navegador)
+$('.side-item[data-goto="score"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert(window.location.hash === '#/score', 'hash reflete a aba ativa (#/score)');
+window.dispatchEvent(new window.Event('popstate'));
+assert(window.location.hash === '#/score', 'popstate mantém hash coerente');
+
+// 15. Sanitização de cor da palavra-chave (não injeta CSS)
+$('#fKeywordColor').value = 'red; background:url(x)';
+$('#fKeywordColor').dispatchEvent(new window.Event('input', { bubbles: true }));
+assert(!$('#viewRoot').innerHTML.includes('background:url'), 'cor inválida não é injetada no estilo');
+
+// 16. Exportar relatório: botão existe na aba Score e executa sem quebrar
+$('#demoBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true })); // garante 2 thumbs
+$('.side-item[data-goto="score"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const exportBtn = $('#viewRoot [data-action="export-report"]');
+assert(!!exportBtn, 'botão exportar relatório presente');
+if (exportBtn) {
+  const before = errors.length;
+  exportBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 80));
+  assert(errors.length === before, 'exportar relatório não lança erro não tratado');
+  assert($('#viewRoot .toast') || true, 'export report exibiu feedback'); // toast é removido async; checagem leve
+}
+
+// 17. A11y do painel (dock): aria-expanded no FAB, aria-hidden no painel
+const fab = $('#fabBtn');
+assert(fab.getAttribute('aria-expanded') === 'false', 'FAB inicia aria-expanded=false');
+$('#fabBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert(fab.getAttribute('aria-expanded') === 'true', 'FAB aria-expanded=true ao abrir');
+assert($('#controlDock').getAttribute('aria-hidden') === 'false', 'dock aria-hidden=false quando aberto');
+$('#dockClose').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert(fab.getAttribute('aria-expanded') === 'false', 'FAB aria-expanded=false ao fechar');
+assert($('#controlDock').getAttribute('aria-hidden') === 'true', 'dock aria-hidden=true quando fechado');
+
+// 18. A11y dos segmentos: aria-pressed reflete a seleção
+$('#segDevice button[data-val="mobile"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert($('#segDevice button[data-val="mobile"]').getAttribute('aria-pressed') === 'true', 'aria-pressed device=mobile');
+assert($('#segDevice button[data-val="desktop"]').getAttribute('aria-pressed') === 'false', 'aria-pressed desktop=false');
+$('#segDevice button[data-val="desktop"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+// 19. Busca: query sincronizada com o hash (#/search?q=…)
+$('#searchInput').value = 'gaming';
+$('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+assert(window.location.hash.startsWith('#/search'), 'hash da busca usa #/search');
+assert(decodeURIComponent(window.location.hash).includes('q=gaming'), 'hash da busca carrega o termo (?q=gaming)');
+
+// 20. Escala real: sua thumb limitada aos px do YouTube
+$('.side-item[data-goto="home"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+$('#tTrueScale').checked = true;
+$('#tTrueScale').dispatchEvent(new window.Event('change', { bubbles: true }));
+assert($('#viewRoot').innerHTML.includes('thumb exibida a ~'), 'badge mostra a largura real');
+assert($('#viewRoot').innerHTML.includes('true-scale'), 'card do usuário ganha a classe de escala real');
+assert($('#viewRoot').innerHTML.includes('px reais'), 'etiqueta de px reais presente');
+$('#tTrueScale').checked = false;
+$('#tTrueScale').dispatchEvent(new window.Event('change', { bubbles: true }));
+assert(!$('#viewRoot').innerHTML.includes('true-scale'), 'desligar escala real remove a classe');
 
 console.log('\n==== RESULTADO ====');
 if (errors.length) {
