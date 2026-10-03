@@ -35,6 +35,9 @@ const state = {
   library: [],            // { id, name, src, title, channel, views, age, duration }
   activeId: null,
   compare: null,          // { a, aEntry, b, bEntry, winner } resultado do A/B
+  abSel: null,
+  abLoading: false,
+  blind: null,
   score: null,
   scoreError: ''
 };
@@ -357,7 +360,7 @@ function invalidateScore(src) {
 /* ----------------------------- FEED / DADOS ----------------------------- */
 function buildFeed(seedShift = 0) {
   const items = [];
-  const N = 20;
+  const N = 36;
   for (let i = 0; i < N; i++) {
     const seed = hashCode(`ferick-${i}-${seedShift}`);
     const rand = rng(seed);
@@ -490,8 +493,9 @@ function shortCard(item) {
   const dim = state.dimNeighbors && !item.own ? 'dim' : '';
   const fb = item.fb != null ? ` data-fb="${item.fb}" onerror="thumbErrorHandler(this)"` : '';
   return `<article class="short-card ${own} ${dim}" data-id="${item.id}">
-      <div class="short-thumb" data-lightbox="${item.thumb}">
-        <img src="${item.thumb}" alt="${esc(item.title)}" loading="lazy"${fb} />
+      <div class="short-thumb short-thumb--fit" data-lightbox="${item.thumb}">
+        <img class="short-bg" src="${item.thumb}" alt="" aria-hidden="true"${fb} />
+        <img class="short-fg" src="${item.thumb}" alt="${esc(item.title)}" loading="lazy"${fb} />
         <div class="short-tools">
           <button class="round-tool" data-action="zoom" data-src="${item.thumb}" title="Ver imagem">${ICON.expand}</button>
           <button class="round-tool" data-action="more" title="Menu">${ICON.more}</button>
@@ -518,7 +522,8 @@ function viewHome() {
 
 /* ----------------------------- VIEW: SHORTS ----------------------------- */
 function viewShorts() {
-  const arr = orderedFeed().slice(0, 14);
+  // Shorts de verdade: grade cheia 9:16.
+  const arr = orderedFeed().slice(0, 16);
   return `
     <div class="shorts-head">
       <span class="shorts-logo">${ICON.play}</span>
@@ -533,16 +538,27 @@ function viewShorts() {
 /* ----------------------------- VIEW: BUSCA ----------------------------- */
 function viewSearch() {
   const q = state.query.trim() || 'thumbnail';
-  const needle = q.toLowerCase();
+  const norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const tokens = norm(q).split(/[^a-z0-9]+/).filter((w) => w.length > 2);
   const all = orderedFeed();
   // Filtro real por texto (título/canal) + sempre inclui o vídeo do usuário.
   const rivals = all.filter((i) => !i.own);
-  const matched = rivals.filter((i) => (i.title + ' ' + i.channel).toLowerCase().includes(needle));
-  const base = (matched.length ? matched : rivals).slice(0, 9);
+  const scored = rivals.map((i) => {
+    const hay = norm(i.title + ' ' + i.channel);
+    let pts = 0;
+    for (const tok of tokens) {
+      if (hay.includes(tok)) pts += 3;
+      else if (tok.length > 4 && hay.includes(tok.slice(0, 5))) pts += 1;
+      else if (tok.endsWith('s') && hay.includes(tok.slice(0, -1))) pts += 2;
+    }
+    return { item: i, rel: tokens.length ? pts / (tokens.length * 3) : 1 };
+  }).sort((x, y) => y.rel - x.rel);
+  const strong = scored.filter((r) => r.rel >= 0.34);
+  const base = (strong.length >= 4 ? strong : scored).slice(0, 11).map((r) => r.item);
   const results = base.slice();
   const ownIdx = clamp(USER_POS, 0, results.length);
   results.splice(ownIdx, 0, userItem());
-  const exact = matched.length;
+  const exact = strong.length;
   const relevanceNote = exact
     ? `Filtro aplicado: <b>${esc(q)}</b> · ${exact} resultado(s) por correspondência de texto`
     : `Filtro aplicado: <b>${esc(q)}</b> · nenhuma correspondência exata — exibindo resultados aproximados`;
@@ -628,6 +644,29 @@ function viewWatch() {
       </div>
     </div>`;
 }
+function ensureAB(a, b) {
+  if (!a || !b || a.id === b.id) { state.compare = null; state.abLoading = false; return; }
+  const cur = state.compare;
+  if (cur && cur.aEntry === a.id && cur.bEntry === b.id) { state.abLoading = false; return; }
+  state.abLoading = true;
+  state.blind = null;
+  Promise.all([analyzeThumb(a.src), analyzeThumb(b.src)]).then(([ra, rb]) => {
+    const A = { score: ra.score, metrics: ra.metrics };
+    const B = { score: rb.score, metrics: rb.metrics };
+    state.compare = { a: A, b: B, aEntry: a.id, bEntry: b.id, winner: A.score === B.score ? 'empate' : (A.score > B.score ? 'A' : 'B') };
+    state.abLoading = false;
+    if (state.tab === 'compare') render(); else syncComparePanel();
+  }).catch(() => { state.abLoading = false; });
+}
+function blindOrder(aId, bId) { return ((hashCode(aId + '|' + bId) % 2) + 2) % 2 === 0 ? ['A', 'B'] : ['B', 'A']; }
+function runBlindVote(pick) {
+  const lib = state.library;
+  if (!lib.length || !state.abSel) return;
+  const a = lib.find((x) => x.id === state.abSel.a) || lib[0];
+  const b = lib.find((x) => x.id === state.abSel.b) || lib[1];
+  state.blind = { order: blindOrder(a.id, b.id), pick, aId: a.id, bId: b.id };
+  if (state.tab === 'compare') render(); else syncComparePanel();
+}
 /* ----------------------------- VIEW: COMPARAR A/B ----------------------------- */
 function viewCompare() {
   const lib = state.library;
@@ -635,20 +674,23 @@ function viewCompare() {
     return `<div class="view-head"><div><h1>Comparar A/B</h1><p>Escolha dois candidatos para comparar lado a lado</p></div></div>
       ${emptyState('Envie pelo menos 2 thumbnails para comparar', 'Use o painel de controle (upload, colar ou URL) e volte aqui.')}`;
   }
-  const selA = $('#selA') ? $('#selA').value : '';
-  const selB = $('#selB') ? $('#selB').value : '';
+  const selA = $('#selA') ? $('#selA').value : (state.abSel && state.abSel.a) || '';
+  const selB = $('#selB') ? $('#selB').value : (state.abSel && state.abSel.b) || '';
   const a = lib.find((t) => t.id === selA) || lib[0];
   const b = lib.find((t) => t.id === selB) || lib[1];
+  state.abSel = { a: a.id, b: b.id };
+  ensureAB(a, b);
   return `
     <div class="view-head">
       <div><h1>Comparar A/B</h1><p>Duas versões, mesma posição de feed. Veja para qual seu olho vai primeiro.</p></div>
       <span class="view-badge"><i></i>${esc(deviceLabel())}</span>
     </div>
     <div class="ab-grid">
-      ${abColumn('A', a, state.compare && state.compare.a)}
-      ${abColumn('B', b, state.compare && state.compare.b)}
+      ${abColumn('A', a, state.compare && state.compare.aEntry === a.id ? state.compare.a : null)}
+      ${abColumn('B', b, state.compare && state.compare.bEntry === b.id ? state.compare.b : null)}
     </div>
     <div class="verdict" id="verdictBox">${verdictHTML()}</div>
+    ${blindHTML()}
     <div style="margin-top:26px">
       <div class="view-head"><div><h1 style="font-size:17px">Os dois no mesmo feed</h1><p>Comparação de impacto dentro da grade</p></div></div>
       <div class="grid" style="--card-min:${cardMin()}px">
@@ -659,6 +701,38 @@ function viewCompare() {
     </div>`;
 }
 
+function blindHTML() {
+  const lib = state.library;
+  if (lib.length < 2 || !state.abSel) return '';
+  const a = lib.find((x) => x.id === state.abSel.a) || lib[0];
+  const b = lib.find((x) => x.id === state.abSel.b) || lib[1];
+  if (a.id === b.id) return '<p class="tiny">Escolha dois candidatos diferentes para o teste cego.</p>';
+  const ok = state.blind && state.blind.aId === a.id && state.blind.bId === b.id;
+  const order = ok ? state.blind.order : blindOrder(a.id, b.id);
+  const pick = ok ? state.blind.pick : null;
+  const byTag = { A: a, B: b };
+  const left = byTag[order[0]];
+  const right = byTag[order[1]];
+  const verdict = pick
+    ? (order[pick === 'left' ? 0 : 1] === (state.compare ? state.compare.winner : null)
+        ? 'Seu olho concordou com o algoritmo. Boa consistencia.'
+        : 'Seu olho discordou do algoritmo — confie no seu instinto e no contexto do nicho.')
+    : 'Clique na thumb que te puxa primeiro — sem ver os rotulos A/B.';
+  return `<div class="blind-box">
+      <div class="view-head"><div><h1 style="font-size:17px">Teste cego</h1><p>${verdict}</p></div>
+      ${pick ? `<button class="mini-btn" data-action="blind-retry" style="max-width:170px">Embaralhar de novo</button>` : ''}</div>
+      <div class="blind-grid">
+        <button class="blind-card" data-action="blind-pick" data-pick="left" aria-label="Escolher thumbnail da esquerda">
+          <img src="${left.src}" alt="Candidato oculto 1" onerror="userThumbErrorHandler(this)" />
+          <span class="blind-tag">${pick ? ('Era a versao ' + order[0]) : 'Opcao 1'}</span>
+        </button>
+        <button class="blind-card" data-action="blind-pick" data-pick="right" aria-label="Escolher thumbnail da direita">
+          <img src="${right.src}" alt="Candidato oculto 2" onerror="userThumbErrorHandler(this)" />
+          <span class="blind-tag">${pick ? ('Era a versao ' + order[1]) : 'Opcao 2'}</span>
+        </button>
+      </div>
+    </div>`;
+}
 function userItemFrom(entry, tag) {
   return {
     kind: 'video', id: 'ab-' + tag + entry.id, own: true,
@@ -679,7 +753,7 @@ function abColumn(tag, entry, analysis) {
       <div class="ab-thumb" data-lightbox="${entry.src}"><img src="${entry.src}" alt="Candidato ${tag}" onerror="userThumbErrorHandler(this)" /></div>
       ${state.hideTitle ? '' : `<h4 class="card-title" style="font-size:14px">${titleHTML((entry.title || state.meta.title) + ` (${tag})`)}</h4>`}
       <div class="ab-metrics">
-        ${metrics.map((m) => `<div class="row"><span>${m.label}</span><b>${Math.round(m.value * 100)}</b></div>`).join('') || '<div class="row"><span>Aguardando análise…</span></div>'}
+        ${metrics.map((m) => `<div class="row"><span>${m.label}</span><b>${Math.round(m.value * 100)}</b></div>`).join('') || '<div class="row"><span class="ab-loading">Analisando thumbnail...</span></div>'} análise…</span></div>'}
       </div>
       <div class="tile-actions" style="display:flex;gap:8px;margin-top:12px">
         <button class="mini-btn" data-action="use-thumb" data-id="${entry.id}">Usar como ativa</button>
@@ -690,8 +764,11 @@ function abColumn(tag, entry, analysis) {
 }
 
 function verdictHTML() {
+  if (state.abLoading) return '<b>Analisando thumbnails...</b> o veredito aparece sozinho.';
+  if (!state.compare) return '<button class="mini-btn primary" data-action="calc-ab" style="max-width:280px">Calcular vencedor agora</button>';
   if (!state.compare) return 'Calcule o score para ver o veredito automático.';
   const { a, b, winner } = state.compare;
+  if (winner === 'empate') return '<b>Empate tecnico.</b> as duas pontuaram igual — mude uma variavel (texto, rosto, contraste) e compare de novo.';
   const win = winner === 'A' ? a : b;
   const lose = winner === 'A' ? b : a;
   const diff = Math.abs(a.score - b.score);
@@ -880,6 +957,15 @@ function bindViewEvents() {
     if (act) {
       const a = act.dataset.action;
       if (a === 'zoom') openLightbox(act.dataset.src);
+      else if (a === 'calc-ab') {
+        const lib = state.library;
+        const x = lib.find((y) => y.id === (state.abSel && state.abSel.a)) || lib[0];
+        const y = lib.find((y) => y.id === (state.abSel && state.abSel.b)) || lib[1];
+        if (x && y && x.id !== y.id) { state.compare = null; ensureAB(x, y); render(); }
+        return;
+      }
+      else if (a === 'blind-pick') { runBlindVote(act.dataset.pick === 'right' ? 'right' : 'left'); return; }
+      else if (a === 'blind-retry') { state.blind = null; if (state.tab === 'compare') render(); else syncComparePanel(); return; }
       else if (a === 'more') toast('Menu do vídeo é apenas decorativo nesta simulação.');
       else if (a === 'use-thumb') setActive(act.dataset.id);
       else if (a === 'del-thumb') removeThumb(act.dataset.id);
@@ -1194,6 +1280,27 @@ function syncSelects() {
   if (state.library.some((t) => t.id === prevA)) a.value = prevA;
   if (state.library.some((t) => t.id === prevB)) b.value = prevB;
   if (!b.value && state.library[1]) b.value = state.library[1].id;
+  if (state.abSel) {
+    if (state.library.some((x) => x.id === state.abSel.a)) a.value = state.abSel.a;
+    if (state.library.some((x) => x.id === state.abSel.b)) b.value = state.abSel.b;
+  } else if (state.library.length > 1) {
+    state.abSel = { a: state.library[0].id, b: state.library[1].id };
+  }
+  syncComparePanel();
+}
+function syncComparePanel() {
+  const box = $('#blindResult');
+  if (!box) return;
+  if (state.library.length < 2 || !state.abSel) { box.innerHTML = ''; return; }
+  const lib = state.library;
+  const a = lib.find((x) => x.id === state.abSel.a) || lib[0];
+  const b = lib.find((x) => x.id === state.abSel.b) || lib[1];
+  const c = state.compare && state.compare.aEntry === a.id && state.compare.bEntry === b.id ? state.compare : null;
+  const line = c
+    ? (c.winner === 'empate' ? `Empate tecnico: A ${c.a.score} x B ${c.b.score}` : `Vencedora: <b>${c.winner}</b> (A ${c.a.score} x B ${c.b.score})`)
+    : (state.abLoading ? 'Analisando thumbnails...' : 'Comparando automaticamente...');
+  const bl = state.blind && state.blind.pick ? `<br>Voto cego: Opcao ${state.blind.pick === 'left' ? '1' : '2'}` : '';
+  box.innerHTML = line + bl;
 }
 
 /* ----------------------------- PERSISTÊNCIA ----------------------------- */
@@ -1311,30 +1418,26 @@ function addFromUrl() {
 async function runBlindTest() {
   const lib = state.library;
   if (lib.length < 2) { toast('Envie ao menos 2 thumbnails.', 'warn'); return; }
-  const [a, b] = lib;
-  const box = $('#blindResult');
-  box.innerHTML = 'Analisando as duas versões…';
-  const ra = await analyzeThumb(a.src);
-  const rb = await analyzeThumb(b.src);
-  if (!ra || ra.score == null || !rb || rb.score == null) {
-    box.innerHTML = scoreErrorMessage(ra && ra.score == null ? ra : rb) || 'Não foi possível analisar as imagens.';
-    return;
-  }
-  const winner = ra.score >= rb.score ? 'A' : 'B';
-  state.compare = { a: ra, aEntry: a.id, b: rb, bEntry: b.id, winner };
-  box.innerHTML = `Modo cego: as duas foram avaliadas pelo mesmo critério.<br/>
-    <b>Versão ${winner}</b> leva vantagem (${Math.max(ra.score, rb.score)} vs ${Math.min(ra.score, rb.score)}).<br/>
-    <span class="tiny">Confie na sua leitura também: a decisão final é sempre do seu público.</span>`;
+  const a = lib.find((x) => x.id === (state.abSel && state.abSel.a)) || lib[0];
+  const b = lib.find((x) => x.id === (state.abSel && state.abSel.b)) || lib[1];
+  state.abSel = { a: a.id, b: b.id };
+  state.blind = null;
+  ensureAB(a, b);
   if (state.tab !== 'compare') { state.tab = 'compare'; syncHash('compare', false); document.body.classList.remove('dock-open'); }
   render();
   $$('.side-item').forEach((el) => el.classList.toggle('active', el.dataset.goto === 'compare'));
+  syncComparePanel();
+  const target = document.querySelector('.blind-box');
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 async function computeCompare() {
   const lib = state.library;
   if (lib.length < 2) return;
-  const a = lib.find((t) => t.id === $('#selA').value) || lib[0];
-  const b = lib.find((t) => t.id === $('#selB').value) || lib[1];
+  const a = lib.find((t) => t.id === ($('#selA') ? $('#selA').value : (state.abSel && state.abSel.a))) || lib[0];
+  const b = lib.find((t) => t.id === ($('#selB') ? $('#selB').value : (state.abSel && state.abSel.b))) || lib[1];
+  state.abSel = { a: a.id, b: b.id };
+  state.abLoading = true;
   const ra = await analyzeThumb(a.src);
   const rb = await analyzeThumb(b.src);
   if (!ra || ra.score == null || !rb || rb.score == null) {
@@ -1342,7 +1445,9 @@ async function computeCompare() {
     if (vb) vb.innerHTML = esc(scoreErrorMessage(ra && ra.score == null ? ra : rb) || 'Não foi possível analisar as imagens.');
     return;
   }
-  state.compare = { a: ra, aEntry: a.id, b: rb, bEntry: b.id, winner: ra.score >= rb.score ? 'A' : 'B' };
+  state.compare = { a: ra, aEntry: a.id, b: rb, bEntry: b.id, winner: ra.score === rb.score ? 'empate' : (ra.score > rb.score ? 'A' : 'B') };
+  state.abLoading = false;
+  syncComparePanel();
   const vb = $('#verdictBox');
   if (vb) vb.innerHTML = verdictHTML();
   if (state.tab === 'compare') render();
