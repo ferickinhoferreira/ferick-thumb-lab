@@ -5,10 +5,11 @@ Ferramenta estática (zero dependências) para **pre-visualizar thumbnails do Yo
 ## O que simula
 - **Home / Shorts / Busca / Watch** — layouts fiéis ao YouTube
 - **Dispositivos:** Desktop, Mobile e TV
-- **Score de impacto local** — análise 100% no navegador (brilho, contraste, saturação, nitidez, regra dos terços, rosto, texto)
+- **Score visual local** — régua de *qualidade visual* medida 100% no navegador (contraste WCAG, presença de tom de pele no centro, saturação, nitidez/Laplaciano, exposição com corte, composição em terços e clareza de áreas lisas). **Não prevê CTR** — é um medidor objetivo de legibilidade/contraste, não um veredito de performance.
 - **Escala real** — exibe sua thumb nos px reais do YouTube (home/busca/a seguir, desktop/mobile/TV)
-- **Exportar relatório em PNG** — thumb + score + métricas + dicas num único arquivo (aba Score)
-- **Comparar A/B** + **Teste cego**
+- **Exportar relatório em PNG** — thumb + score + métricas + **números medidos** (luminância média, razão de contraste WCAG, nitidez, saturação) num único arquivo (aba Score)
+- **Comparar A/B** + **Teste cego** (o teste cego abre sob demanda, no botão, para não repetir o par A/B)
+- **Shorts realista** — quadro 9:16 preenchido (crop) com overlay de canal/título e **guia de área segura** (topo 15% / base 35%)
 - **Biblioteca** com persistência em `localStorage`
 - Clique numa miniatura da biblioteca = ela vira a thumbnail **ATIVA** no preview
 - Navegação por URL (`#/home`, `#/score`) com botão voltar do navegador

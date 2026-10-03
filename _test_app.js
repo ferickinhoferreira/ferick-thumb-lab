@@ -55,7 +55,9 @@ Object.defineProperty(window.document, 'readyState', { configurable: true, get: 
 
 // Executa o app
 try {
-  window.eval(appJs);
+  // Anexa um "export" para os testes: funções puras do motor de score ficam no
+  // escopo do eval (strict mode), então as expomos explicitamente em window.
+  window.eval(appJs + '\n;window.__score = { relLum, contrastRatio, isSkin, metricHint, statsStrip, analyzeThumb, refreshScore };\n');
   console.log('[debug] eval ok; readyState =', window.document.readyState);
   // Garante boot mesmo se o listener não tiver sido registrado a tempo
   window.document.dispatchEvent(new window.Event('DOMContentLoaded', { bubbles: true }));
@@ -269,13 +271,27 @@ assert($('#selA').value !== $('#selB').value, 'A e B apontam para thumbnails dif
 const verdictNow = $('#verdictBox') ? $('#verdictBox').textContent : '';
 assert(/Vencedora|Empate/.test(verdictNow), 'veredito A/B calculado automaticamente');
 
-// 21b. Teste cego: mostra duas opcoes ocultas e registra o voto
-assert($$('#viewRoot .blind-card').length === 2, 'teste cego mostra 2 candidatos ocultos');
-const pickCard = $('#viewRoot .blind-card[data-pick="left"]');
-if (pickCard) {
-  pickCard.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+// 21b. Teste cego: agora fica escondido atras de um botao (nao repete o par A/B)
+assert($$('#viewRoot .blind-card').length === 0, 'teste cego oculto por padrao (sem duplicar o par A/B)');
+const blindOpenBtn = $('#viewRoot [data-action="toggle-blind"]');
+assert(!!blindOpenBtn, 'botao "Fazer teste cego" presente');
+if (blindOpenBtn) {
+  blindOpenBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 60));
-  assert($('#viewRoot').innerHTML.includes('Era a vers'), 'voto cego revela qual versao era');
+  assert($$('#viewRoot .blind-card').length === 2, 'teste cego mostra 2 candidatos ocultos ao abrir');
+  const pickCard = $('#viewRoot .blind-card[data-pick="left"]');
+  if (pickCard) {
+    pickCard.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    assert($('#viewRoot').innerHTML.includes('Era a vers'), 'voto cego revela qual versao era');
+  }
+  // Fecha de novo: some da pagina (sem duplicar o par)
+  const closeBtn = $('#viewRoot [data-action="toggle-blind"]');
+  if (closeBtn) {
+    closeBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    assert($$('#viewRoot .blind-card').length === 0, 'fechar teste cego volta a esconder o bloco');
+  }
 }
 
 // 21c. Botao "Calcular vencedor agora" existe quando nao ha veredito
@@ -286,18 +302,82 @@ $('#searchInput').value = 'thumbnail';
 $('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 await new Promise((r) => setTimeout(r, 40));
 assert($$('#viewRoot .result').length >= 8, 'busca retorna grade cheia (' + $$('#viewRoot .result').length + ')');
+// 22b. Sem duplicados: cada resultado tem par (titulo + thumb) unico
+const resultKeys = $$('#viewRoot .result').map((el) => {
+  const t = el.querySelector('.result-title');
+  const img = el.querySelector('img');
+  return (t ? t.textContent.trim() : '') + '|' + (img ? img.getAttribute('src') : '');
+});
+assert(new Set(resultKeys).size === resultKeys.length, 'busca nao repete resultados duplicados');
 // busca tolerante a acento/plural
 $('#searchInput').value = 'thumbs';
 $('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 await new Promise((r) => setTimeout(r, 40));
 assert($$('#viewRoot .result').length >= 1, 'busca tolerante (thumbs) retorna resultados');
 
-// 23. Shorts: imagens sem letterbox (fundo + frente) e sem sobra de template
+// 23. Shorts: quadro 9:16 preenchido (crop) + overlay realista, sem letterbox
 $('.side-item[data-goto="shorts"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
 await new Promise((r) => setTimeout(r, 40));
 assert($$('#viewRoot .short-card').length >= 10, 'grade de shorts cheia (' + $$('#viewRoot .short-card').length + ')');
-assert($$('#viewRoot .short-thumb--fit').length >= 1, 'shorts usam enquadramento sem letterbox');
+assert($$('#viewRoot .short-media').length >= 1, 'shorts preenchem o quadro 9:16 (crop, sem letterbox)');
+assert($$('#viewRoot .short-bg').length === 0, 'sem fundo desfocado (letterbox) no Shorts');
+assert($$('#viewRoot .short-overlay').length >= 1, 'overlay de titulo/canal dentro do quadro');
+assert($$('#viewRoot .safe-zone').length >= 1, 'guia de area segura visivel por padrao');
+// Toggle do guia de area segura
+const sz = $('#tSafeZone');
+assert(!!sz, 'toggle de area segura presente no header do Shorts');
+if (sz) {
+  sz.checked = false;
+  sz.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 40));
+  assert($$('#viewRoot .safe-zone').length === 0, 'desligar o guia remove a area segura');
+}
 assert(!$('#viewRoot').innerHTML.includes('} análise'), 'sem sobra de template no markup');
+
+// 27. Motor de Score visual: funções e métricas novas (válido mesmo com canvas stubado)
+const S = window.__score;
+assert(S && typeof S.relLum === 'function', 'relLum existe (luminância WCAG)');
+assert(S && typeof S.contrastRatio === 'function', 'contrastRatio existe (razão WCAG)');
+assert(S && typeof S.isSkin === 'function', 'isSkin existe (detector de tom de pele)');
+assert(S && typeof S.metricHint === 'function', 'metricHint existe (tooltip por métrica)');
+assert(S && typeof S.statsStrip === 'function', 'statsStrip existe (números medidos)');
+
+// Luminância: preto ~0, branco ~1 e monotônica.
+assert(S.relLum(0, 0, 0) < 0.001, 'relLum(preto) ~0');
+assert(S.relLum(255, 255, 255) > 0.999, 'relLum(branco) ~1');
+assert(S.relLum(255, 255, 255) > S.relLum(128, 128, 128) && S.relLum(128, 128, 128) > S.relLum(0, 0, 0), 'relLum é monotônica');
+
+// Razão de contraste WCAG: piso 1:1, teto ~21:1 e simétrica.
+assert(Math.abs(S.contrastRatio(0.5, 0.5) - 1) < 1e-9, 'contrastRatio igual = 1:1');
+assert(S.contrastRatio(1, 0) > 20, 'contrastRatio branco/preto > 20:1');
+assert(S.contrastRatio(1, 0) === S.contrastRatio(0, 1), 'contrastRatio é simétrica');
+
+// Tom de pele: aceita um tom típico e rejeita azul.
+assert(S.isSkin(224, 172, 140) === true, 'isSkin aceita tom de pele típico');
+assert(S.isSkin(20, 20, 200) === false, 'isSkin rejeita azul puro');
+
+// analyzeThumb (com canvas stubado) resolve no formato novo: score + metrics + stats.
+const thumbsForScore = window.document.querySelectorAll('#library .lib-item img, #library img');
+let scoreSrc = (thumbsForScore[0] && thumbsForScore[0].getAttribute('src')) || '';
+if (!scoreSrc) {
+  window.eval("addThumb('assets/rivals/1.jpeg', { title: 'teste-score' });");
+  scoreSrc = 'assets/rivals/1.jpeg';
+}
+const analysis = await S.analyzeThumb(scoreSrc);
+assert(analysis && analysis.error === null, 'analyzeThumb resolve sem erro (canvas stub)');
+assert(typeof analysis.score === 'number' && analysis.score >= 0 && analysis.score <= 100, 'score numérico entre 0 e 100 (' + analysis.score + ')');
+assert(Array.isArray(analysis.metrics) && analysis.metrics.length === 7, '7 métricas no novo motor (' + (analysis.metrics && analysis.metrics.length) + ')');
+const metricKeys = (analysis.metrics || []).map((m) => m.key);
+['contrast', 'subject', 'saturation', 'sharp', 'exposure', 'composition', 'clarity'].forEach((k) => {
+  assert(metricKeys.includes(k), 'métrica presente: ' + k);
+});
+assert(analysis.stats && typeof analysis.stats.meanLight === 'number' && typeof analysis.stats.wcag === 'number', 'stats medidos presentes (meanLight, wcag)');
+
+// statsStrip (view) monta chips com os números medidos.
+const strip = S.statsStrip(analysis.stats);
+assert(typeof strip === 'string' && strip.includes('stat-chip'), 'statsStrip gera chips');
+// Tooltip por métrica cobre todas as chaves novas.
+assert(metricKeys.every((k) => S.metricHint(k).length > 0), 'metricHint cobre todas as métricas');
 
 console.log('\n==== RESULTADO ====');
 if (errors.length) {

@@ -38,6 +38,8 @@ const state = {
   abSel: null,
   abLoading: false,
   blind: null,
+  blindOpen: false,       // "Teste cego" só aparece depois de clicar no botão
+  safeZone: true,         // guia de área segura do Shorts (topo 15% / base 35%)
   score: null,
   scoreError: ''
 };
@@ -257,12 +259,36 @@ function makePlaceholderThumb() {
   return c.toDataURL('image/jpeg', 0.8);
 }
 
-/* ----------------------------- SCORE DE IMPACTO ----------------------------- */
-/* Heurística local: 6 métricas objetivas calculadas pixel a pixel no canvas.
-   Tudo roda no navegador — nenhuma imagem é enviada para fora. */
+/* ----------------------------- SCORE VISUAL ----------------------------- */
+/* Análise 100% local, pixel a pixel, no canvas — nenhuma imagem sai do navegador.
+
+   IMPORTANTE (honestidade): este NÃO é um preditor de CTR nem do algoritmo do
+   YouTube. É uma régua OBJETIVA de qualidade visual: mede propriedades
+   mensuráveis da imagem (contraste, foco, cor, brilho, presença de tom de pele
+   e clareza em tamanho pequeno). Serve para comparar versões com a mesma régua
+   e achar defeitos visuais antes de publicar — não para "prever cliques". */
 /* Cache de análises por src: evita recalcular a mesma imagem em refreshScore,
    computeCompare e runBlindTest. Guarda a Promise para deduplicar chamadas. */
 const _scoreCache = new Map();
+
+/* Luminância relativa WCAG (sRGB com correção de gamma). */
+function relLum(r8, g8, b8) {
+  const f = (v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(r8) + 0.7152 * f(g8) + 0.0722 * f(b8);
+}
+/* Razão de contraste WCAG entre dois valores de luminância relativa (1..21). */
+function contrastRatio(l1, l2) {
+  const a = Math.max(l1, l2), b = Math.min(l1, l2);
+  return (a + 0.05) / (b + 0.05);
+}
+/* Detecta pixel de tom de pele por crominância YCbCr (regra clássica e estável). */
+function isSkin(r, g, b) {
+  const y = 0.299 * r + 0.587 * g + 0.114 * b;
+  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+  return y > 40 && cb >= 77 && cb <= 135 && cr >= 135 && cr <= 180 && r > g && r > b && (r - g) >= 8;
+}
+
 function analyzeThumb(src, { fresh = false } = {}) {
   if (!src) return Promise.resolve(null);
   if (!fresh && _scoreCache.has(src)) return _scoreCache.get(src);
@@ -271,82 +297,149 @@ function analyzeThumb(src, { fresh = false } = {}) {
     if (!src.startsWith('data:')) img.crossOrigin = 'anonymous';
     img.onload = () => {
       try {
-        const W = 128, H = 72;
+        // 320×180: mais detalhe que 128×72 sem custo perceptível.
+        const W = 320, H = 180;
         const c = document.createElement('canvas'); c.width = W; c.height = H;
         const g = c.getContext('2d', { willReadFrequently: true });
         g.drawImage(img, 0, 0, W, H);
         const { data } = g.getImageData(0, 0, W, H);
 
-        const lum = new Float32Array(W * H);
-        let sumL = 0, sumSat = 0, n = 0, darkPx = 0, brightPx = 0, topL = 0, botL = 0;
+        const n = W * H;
+        const lum = new Float32Array(n);
+        let sumL = 0, sumSat = 0;
+        let underPx = 0, overPx = 0;   // subexposto / superexposto
+        let skinCenter = 0, centerN = 0;
+        let sumR = 0, sumG = 0, sumB = 0;
+        const histogram = new Float32Array(32); // 32 bins de luminância
+
         for (let y = 0; y < H; y++) {
           for (let x = 0; x < W; x++) {
             const i = (y * W + x) * 4, k = y * W + x;
-            const r = data[i] / 255, gg = data[i + 1] / 255, b = data[i + 2] / 255;
-            const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b);
-            const l = 0.2126 * r + 0.7152 * gg + 0.0722 * b;
+            const r = data[i], gg = data[i + 1], b = data[i + 2];
+            const rn = r / 255, gn = gg / 255, bn = b / 255;
+            const mx = Math.max(rn, gn, bn), mn = Math.min(rn, gn, bn);
+            // Luminância com gamma (perceptual), não média linear de canais.
+            const l = relLum(r, gg, b);
             const s = mx === 0 ? 0 : (mx - mn) / mx;
-            lum[k] = l; sumL += l; sumSat += s; n++;
-            if (l < 0.2) darkPx++;
-            if (l > 0.8) brightPx++;
-            if (y < H / 2) topL += l; else botL += l;
+            lum[k] = l; sumL += l; sumSat += s;
+            sumR += r; sumG += gg; sumB += b;
+            if (l < 0.06) underPx++;
+            if (l > 0.9) overPx++;
+            histogram[clamp(Math.floor(l * 32), 0, 31)]++;
+            // Rosto costuma ficar no miolo: mede tom de pele no terço central.
+            if (x > W * 0.25 && x < W * 0.75 && y > H * 0.12 && y < H * 0.88) {
+              centerN++;
+              if (isSkin(r, gg, b)) skinCenter++;
+            }
           }
         }
         const meanL = sumL / n, meanSat = sumSat / n;
+        const meanR = sumR / n, meanG = sumG / n, meanB = sumB / n;
+
+        // Desvio-padrão da luminância (contraste global)
         let varL = 0;
         for (let k = 0; k < n; k++) varL += (lum[k] - meanL) ** 2;
         const stdL = Math.sqrt(varL / n);
 
-        let grad = 0;
+        // Contraste WCAG aproximado: percentil 90 x percentil 10 da luminância.
+        let acc = 0, p10 = 0, p90 = 1;
+        for (let bi = 0; bi < 32; bi++) { acc += histogram[bi]; if (acc >= n * 0.1) { p10 = bi / 31; break; } }
+        acc = 0;
+        for (let bi = 31; bi >= 0; bi--) { acc += histogram[bi]; if (acc >= n * 0.1) { p90 = bi / 31; break; } }
+        const wcag = contrastRatio(p90, p10); // 1..21
+// Nitidez: variância do Laplaciano (medida padrão de foco).
+        let lapSum = 0, lapSum2 = 0, lapN = 0;
         for (let y = 1; y < H - 1; y++) {
           for (let x = 1; x < W - 1; x++) {
             const k = y * W + x;
-            grad += Math.abs(lum[k] - lum[k + 1]) + Math.abs(lum[k] - lum[k + W]);
+            const lap = 4 * lum[k] - lum[k - 1] - lum[k + 1] - lum[k - W] - lum[k + W];
+            lapSum += lap; lapSum2 += lap * lap; lapN++;
           }
         }
-        const sharp = clamp((grad / ((W - 2) * (H - 2)) - 0.015) / 0.085, 0, 1);
+        const lapMean = lapSum / lapN;
+        const lapVar = Math.max(0, lapSum2 / lapN - lapMean * lapMean);
 
-        let cSum = 0, cN = 0, bSum = 0, bN = 0;
-        for (let y = 0; y < H; y++) {
-          for (let x = 0; x < W; x++) {
-            const k = y * W + x, l = lum[k];
-            if (x > W * 0.3 && x < W * 0.7 && y > H * 0.22 && y < H * 0.78) { cSum += l; cN++; }
-            else { bSum += l; bN++; }
+        // Energia de bordas na faixa dos terços (composição real, não assimetria).
+        let edge = 0, edgeN = 0;
+        const nearThird = (v) => Math.abs(v - 1 / 3) < 0.09 || Math.abs(v - 2 / 3) < 0.09;
+        for (let y = 1; y < H - 1; y++) {
+          for (let x = 1; x < W - 1; x++) {
+            if (!nearThird(x / W) || !nearThird(y / H)) continue;
+            const k = y * W + x;
+            edge += Math.abs(lum[k] - lum[k + 1]) + Math.abs(lum[k] - lum[k + W]);
+            edgeN++;
           }
         }
-        const centerFocus = clamp(Math.abs(cSum / cN - bSum / bN) / 0.24, 0, 1);
-        const thirds = clamp(Math.abs(topL / (n / 2) - botL / (n / 2)) / 0.3, 0, 1);
-        const cropSafe = clamp(1 - (darkPx / n) * 1.35, 0, 1);
+        const thirdsEnergy = edgeN ? edge / edgeN : 0;
+
+        // Clareza em thumbnail pequena: % de área "chapada" (sem detalhe).
+        let flat = 0;
+        for (let y = 1; y < H - 1; y++) {
+          for (let x = 1; x < W - 1; x++) {
+            const k = y * W + x;
+            const d = Math.abs(lum[k] - lum[k + 1]) + Math.abs(lum[k] - lum[k + W]);
+            if (d < 0.01) flat++;
+          }
+        }
+        const flatRatio = flat / n;
+
+        const skinRatio = centerN ? skinCenter / centerN : 0;
+        const underRatio = underPx / n, overRatio = overPx / n;
+
+        /* ---- Métricas normalizadas (0..1) com pesos transparentes ---- */
+        // Contraste: dispersão (stdL) + razão WCAG (5:1 já é forte).
+        const contrast = clamp(0.5 * clamp((stdL - 0.05) / 0.18, 0, 1) + 0.5 * clamp((wcag - 1.6) / 5.4, 0, 1), 0, 1);
+        // Cores: ideal ~0.45 de saturação; penaliza cinza e cansaço por excesso.
+        const saturation = clamp(1 - Math.abs(meanSat - 0.45) / 0.45, 0, 1);
+        // Nitidez a partir da variância do Laplaciano.
+        const sharp = clamp((Math.sqrt(lapVar) - 0.004) / 0.05, 0, 1);
+        // Exposição: brilho médio alvo ~0.46 + penaliza clipping.
+        const exposure = clamp((1 - Math.abs(meanL - 0.46) / 0.40) * (1 - clamp(underRatio * 1.2, 0, 0.85)) * (1 - clamp(overRatio * 1.2, 0, 0.85)), 0, 1);
+        // Sujeito/rosto: proporção de tom de pele no miolo (proxy de rosto).
+        const subject = clamp(skinRatio / 0.12, 0, 1);
+        // Composição: energia de borda nos terços + equilíbrio de brilho.
+        const composition = clamp(0.6 * clamp((thirdsEnergy - 0.008) / 0.05, 0, 1) + 0.4 * (1 - clamp(Math.abs(meanL - 0.46) / 0.5, 0, 1)), 0, 1);
+        // Clareza: menos área chapada = melhor leitura em tamanho pequeno.
+        const clarity = clamp(1 - clamp((flatRatio - 0.1) / 0.4, 0, 1), 0, 1);
 
         const metrics = [
-          { key: 'contrast', label: 'Contraste', value: clamp((stdL - 0.075) / 0.16, 0, 1), weight: 0.24 },
-          { key: 'saturation', label: 'Cores vivas', value: clamp(meanSat / 0.62, 0, 1), weight: 0.16 },
-          { key: 'sharp', label: 'Nitidez', value: sharp, weight: 0.16 },
-          { key: 'focus', label: 'Foco central', value: centerFocus, weight: 0.16 },
-          { key: 'balance', label: 'Composição', value: clamp((thirds + cropSafe) / 2, 0, 1), weight: 0.14 },
-          { key: 'exposure', label: 'Exposição', value: clamp(1 - Math.abs(meanL - 0.48) / 0.42, 0, 1), weight: 0.14 }
+          { key: 'contrast', label: 'Contraste', value: contrast, weight: 0.22 },
+          { key: 'subject', label: 'Sujeito/rosto', value: subject, weight: 0.18 },
+          { key: 'saturation', label: 'Cores', value: saturation, weight: 0.14 },
+          { key: 'sharp', label: 'Nitidez', value: sharp, weight: 0.14 },
+          { key: 'exposure', label: 'Exposição', value: exposure, weight: 0.12 },
+          { key: 'composition', label: 'Composição', value: composition, weight: 0.10 },
+          { key: 'clarity', label: 'Clareza', value: clarity, weight: 0.10 }
         ];
 
         let score = 0;
         metrics.forEach((m) => { score += m.value * m.weight; });
         score = Math.round(clamp(score, 0, 1) * 100);
 
+        /* ---- Dicas baseadas em números medidos (transparentes) ---- */
         const notes = [];
-        if (metrics[0].value < 0.45) notes.push('Aumente o contraste: o feed é claro e cheio de cores.');
-        if (metrics[1].value < 0.45) notes.push('Cores mais vivas destacam a thumb na home.');
-        if (metrics[2].value < 0.4) notes.push('A imagem parece suave/borrada em tamanho pequeno.');
-        if (metrics[3].value < 0.4) notes.push('Centralize o elemento principal — o card é 16:9.');
-        if (metrics[5].value < 0.4) notes.push(meanL < 0.48 ? 'A thumb está escura demais no feed.' : 'A thumb está estourada de brilho.');
-        if (brightPx / n > 0.22) notes.push('Muito branco puro: em telas pequenas vira "luz estourada".');
-        if (!notes.length) notes.push('Boa base! Teste variações de expressão/cor para subir mais.');
+        if (contrast < 0.45) notes.push(`Contraste baixo (razão WCAG ~${wcag.toFixed(1)}:1) — o card some no feed claro.`);
+        if (subject < 0.35) notes.push(`Pouco tom de pele no miolo (${Math.round(skinRatio * 100)}%): um rosto costuma puxar mais o olhar.`);
+        if (saturation < 0.4) notes.push(meanSat < 0.45 ? 'Cores lavadas: suba a saturação para destacar na grade.' : 'Cores fortes demais — pode cansar o olho; teste um fundo mais neutro.');
+        if (sharp < 0.4) notes.push('Imagem suave/borrada — em 168px parecerá sem foco.');
+        if (exposure < 0.45) notes.push(meanL < 0.46 ? `Escura (brilho médio ${meanL.toFixed(2)}; ${Math.round(underRatio * 100)}% no escuro).` : `Estourada (brilho médio ${meanL.toFixed(2)}; ${Math.round(overRatio * 100)}% no branco puro).`);
+        if (composition < 0.4) notes.push('Pouco interesse nos terços — descentralize o elemento principal.');
+        if (clarity < 0.4) notes.push(`Área "chapada" alta (${Math.round(flatRatio * 100)}%): em tamanho pequeno vira mancha.`);
+        if (!notes.length) notes.push('Boa base visual! Gere variações e valide com o teste cego antes de publicar.');
 
-        resolve({ score, metrics, notes, error: null });
+        // Resumo numérico visível (transparência da medição).
+        const stats = {
+          meanLight: meanL, meanSat, wcag, skinRatio, flatRatio, underRatio, overRatio,
+          meanR, meanG, meanB
+        };
+
+        resolve({ score, metrics, notes, stats, error: null });
       } catch (err) {
         // getImageData falha quando a imagem externa não envia cabeçalhos CORS.
-        resolve({ score: null, metrics: [], notes: [], error: 'cors' });
+        resolve({ score: null, metrics: [], notes: [], stats: null, error: 'cors' });
       }
     };
-    img.onerror = () => resolve({ score: null, metrics: [], notes: [], error: 'load' });
+    img.onerror = () => resolve({ score: null, metrics: [], notes: [], stats: null, error: 'load' });
     img.src = src;
   });
   _scoreCache.set(src, p);
@@ -492,18 +585,36 @@ function shortCard(item) {
   const own = item.own && state.revealOwn ? 'reveal-own' : '';
   const dim = state.dimNeighbors && !item.own ? 'dim' : '';
   const fb = item.fb != null ? ` data-fb="${item.fb}" onerror="thumbErrorHandler(this)"` : '';
+  // Shorts de verdade: o quadro 9:16 é preenchido (crop central) pela imagem,
+  // a UI do YouTube (curtidas/comentários) cobre a base e o título fica no
+  // rodapé esquerdo. O guia de área segura mostra onde a interface tapa.
+  const safe = state.safeZone
+    ? `<div class="safe-zone" aria-hidden="true">
+        <span class="safe-guide safe-guide--top"></span>
+        <span class="safe-guide safe-guide--bottom"></span>
+      </div>`
+    : '';
   return `<article class="short-card ${own} ${dim}" data-id="${item.id}">
-      <div class="short-thumb short-thumb--fit" data-lightbox="${item.thumb}">
-        <img class="short-bg" src="${item.thumb}" alt="" aria-hidden="true" loading="lazy" />
-        <img class="short-fg" src="${item.thumb}" alt="${esc(item.title)}" loading="lazy"${fb} />
+      <div class="short-thumb" data-lightbox="${item.thumb}">
+        <img class="short-media" src="${item.thumb}" alt="${esc(item.title)}" loading="lazy"${fb} />
+        ${safe}
+        <div class="short-scrim"></div>
+        <div class="short-ui" aria-hidden="true">
+          <div class="short-ui-rail">
+            <span class="short-ui-btn"><svg viewBox="0 0 24 24"><path d="M12 20s-7.5-4.6-7.5-9.4A4.1 4.1 0 0 1 12 7.6a4.1 4.1 0 0 1 7.5 3c0 4.8-7.5 9.4-7.5 9.4z"/></svg></span>
+            <span class="short-ui-btn"><svg viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.4 9.4 0 0 1-2.8-.4L3 21l1.5-4.2A8.2 8.2 0 0 1 3 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/></svg></span>
+            <span class="short-ui-btn"><svg viewBox="0 0 24 24"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M12 15V3M8 7l4-4 4 4"/></svg></span>
+          </div>
+        </div>
+        <div class="short-overlay">
+          <p class="short-channel"><span class="short-avatar">${esc(initials(item.channel))}</span>${esc(item.channel)}</p>
+          <p class="short-caption">${esc(item.shortTitle || item.title)}</p>
+        </div>
         <div class="short-tools">
           <button class="round-tool" data-action="zoom" data-src="${item.thumb}" title="Ver imagem">${ICON.expand}</button>
           <button class="round-tool" data-action="more" title="Menu">${ICON.more}</button>
         </div>
-        ${state.hideTitle ? '' : `<div class="short-overlay">${esc(item.shortTitle || item.title)}</div>`}
       </div>
-      ${state.hideTitle ? '' : `<h3 class="short-title">${titleHTML(item.title)}</h3>`}
-      ${state.hideMeta ? '' : `<p class="short-views">${esc(item.views)}</p>`}
     </article>`;
 }
 /* ----------------------------- VIEW: HOME ----------------------------- */
@@ -522,13 +633,14 @@ function viewHome() {
 
 /* ----------------------------- VIEW: SHORTS ----------------------------- */
 function viewShorts() {
-  // Shorts de verdade: grade cheia 9:16.
+  // Shorts de verdade: grade cheia 9:16, quadro preenchido (crop) e overlay da UI.
   const arr = orderedFeed().slice(0, 16);
   return `
     <div class="shorts-head">
       <span class="shorts-logo">${ICON.play}</span>
       <h1>Shorts</h1>
       <span class="view-badge"><i></i>formato 9:16</span>
+      <label class="switch shorts-safezone"><input type="checkbox" id="tSafeZone" ${state.safeZone ? 'checked' : ''} /><span></span>Guia de área segura</label>
     </div>
     <div class="shorts-grid" style="--short-min:${shortMin()}px">
       ${arr.map((item) => shortCard({ ...item, shortTitle: item.own ? state.meta.shortTitle : item.shortTitle })).join('')}
@@ -553,8 +665,18 @@ function viewSearch() {
     }
     return { item: i, rel: tokens.length ? pts / (tokens.length * 3) : 1 };
   }).sort((x, y) => y.rel - x.rel);
-  const strong = scored.filter((r) => r.rel >= 0.34);
-  const base = (strong.length >= 4 ? strong : scored).slice(0, 11).map((r) => r.item);
+  // Remove duplicados (mesmo título + mesma thumb) — o feed cicla poucos
+  // títulos/imagens e sem isso a busca repete resultados idênticos.
+  const seen = new Set();
+  const unique = [];
+  for (const r of scored) {
+    const key = norm(r.item.title) + '|' + r.item.thumb;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
+  const strong = unique.filter((r) => r.rel >= 0.34);
+  const base = (strong.length >= 4 ? strong : unique).slice(0, 11).map((r) => r.item);
   const results = base.slice();
   const ownIdx = clamp(USER_POS, 0, results.length);
   results.splice(ownIdx, 0, userItem());
@@ -694,7 +816,7 @@ function viewCompare() {
       ${abColumn('B', b, state.compare && state.compare.bEntry === b.id ? state.compare.b : null)}
     </div>
     <div class="verdict" id="verdictBox">${verdictHTML()}</div>
-    ${blindHTML()}
+    ${blindToggleHTML()}
     <div style="margin-top:26px">
       <div class="view-head"><div><h1 style="font-size:17px">Os dois no mesmo feed</h1><p>Comparação de impacto dentro da grade</p></div></div>
       <div class="grid" style="--card-min:${cardMin()}px">
@@ -702,6 +824,22 @@ function viewCompare() {
         ${videoCard(userItemFrom(b, 'B'))}
         ${orderedFeed().filter((i) => !i.own).slice(0, 6).map(videoCard).join('')}
       </div>
+    </div>`;
+}
+
+/* Controla o "Teste cego": fica escondido atrás de um botão para não repetir o
+   mesmo par de thumbnails que já aparece nas colunas A/B acima. */
+function blindToggleHTML() {
+  if (state.library.length < 2) return '';
+  if (!state.blindOpen) {
+    return `<div class="blind-bar">
+        <button class="solid-btn" data-action="toggle-blind" style="max-width:240px">Fazer teste cego</button>
+        <span class="tiny">Compare sem os rótulos A/B — seu olho escolhe primeiro.</span>
+      </div>`;
+  }
+  return `${blindHTML()}
+    <div class="blind-bar">
+      <button class="mini-btn" data-action="toggle-blind" style="max-width:220px">Fechar teste cego</button>
     </div>`;
 }
 
@@ -814,13 +952,13 @@ function viewLibrary() {
 function viewScore() {
   const active = state.library.find((t) => t.id === state.activeId) || state.library[0];
   if (!active) {
-    return `<div class="view-head"><div><h1>Score de impacto</h1><p>Análise local da sua thumbnail</p></div></div>
+    return `<div class="view-head"><div><h1>Score visual</h1><p>Análise local da sua thumbnail</p></div></div>
       ${emptyState('Nenhuma thumbnail para analisar', 'Envie uma imagem para receber o score de 0 a 100 com métricas detalhadas.')}`;
   }
   const a = state.score || { score: 0, metrics: [], notes: ['Envie uma imagem para calcular.'] };
   return `
     <div class="view-head">
-      <div><h1>Score de impacto</h1><p>Análise 100% local: brilho, contraste, cores, nitidez e composição</p></div>
+      <div><h1>Score visual</h1><p>Análise 100% local: contraste (WCAG), foco, cor, brilho, rosto e clareza</p></div>
       <span class="view-badge"><i></i>${a.score}/100</span>
     </div>
     <div class="ab-grid">
@@ -837,18 +975,47 @@ function viewScore() {
             <div class="score-center"><span>${a.score}</span><small>${gradeLabel(a.score)}</small></div>
           </div>
           <ul class="score-metrics">
-            ${a.metrics.map((m) => `<li><span>${m.label}</span><span class="m-bar"><i style="width:${Math.round(m.value * 100)}%"></i></span><b>${Math.round(m.value * 100)}</b></li>`).join('')}
+            ${a.metrics.map((m) => `<li title="${metricHint(m.key)}"><span>${m.label}</span><span class="m-bar"><i style="width:${Math.round(m.value * 100)}%"></i></span><b>${Math.round(m.value * 100)}</b></li>`).join('')}
           </ul>
         </div>
+        ${statsStrip(a.stats)}
         <div class="verdict">
           <b>Dicas automáticas</b>
           <ul style="margin:8px 0 0;padding-left:18px">${a.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
         </div>
+        <p class="tiny score-honest">Régua objetiva de qualidade visual — mede a imagem, <b>não</b> prevê CTR nem o algoritmo do YouTube. Use o teste cego e o A/B para validar com pessoas.</p>
         <div style="margin-top:16px">
           <button class="solid-btn" data-action="export-report">Exportar relatório (PNG)</button>
         </div>
       </div>
     </div>`;
+}
+
+/* Texto de ajuda (tooltip) por métrica — transparência do cálculo. */
+function metricHint(key) {
+  const map = {
+    contrast: 'Contraste: dispersão da luminância + razão de contraste WCAG (percentis 10/90).',
+    subject: 'Sujeito/rosto: % de pixels de tom de pele no terço central (heurística YCbCr).',
+    saturation: 'Cores: saturação média HSV, com ideal em torno de 45% (nem lavado, nem estourado).',
+    sharp: 'Nitidez: variância do Laplaciano (quanto maior, mais focado).',
+    exposure: 'Exposição: proximidade do brilho médio ideal + penalidade de clipping.',
+    composition: 'Composição: energia de borda nos terços + equilíbrio de brilho.',
+    clarity: 'Clareza: quanto menor a área "chapada" (sem detalhe), melhor a leitura em tamanho pequeno.'
+  };
+  return map[key] || '';
+}
+
+/* Faixa com os números medidos — mostra que o score vem de dados reais. */
+function statsStrip(s) {
+  if (!s) return '';
+  const chip = (label, value) => `<span class="stat-chip"><b>${value}</b>${label}</span>`;
+  return `<div class="stats-strip">
+    ${chip('brilho médio', s.meanLight.toFixed(2))}
+    ${chip('contraste WCAG', s.wcag.toFixed(1) + ':1')}
+    ${chip('saturação', Math.round(s.meanSat * 100) + '%')}
+    ${chip('tom de pele', Math.round(s.skinRatio * 100) + '%')}
+    ${chip('área chapada', Math.round(s.flatRatio * 100) + '%')}
+  </div>`;
 }
 
 function emptyState(title, desc) {
@@ -969,6 +1136,7 @@ function bindViewEvents() {
       }
       else if (a === 'blind-pick') { runBlindVote(act.dataset.pick === 'right' ? 'right' : 'left'); return; }
       else if (a === 'blind-retry') { state.blind = null; if (state.tab === 'compare') render(); else syncComparePanel(); return; }
+      else if (a === 'toggle-blind') { state.blindOpen = !state.blindOpen; render(); return; }
       else if (a === 'more') toast('Menu do vídeo é apenas decorativo nesta simulação.');
       else if (a === 'use-thumb') setActive(act.dataset.id);
       else if (a === 'del-thumb') removeThumb(act.dataset.id);
@@ -986,6 +1154,13 @@ function bindViewEvents() {
     if (!zoomTarget || e.target.closest('[data-action]')) return;
     e.preventDefault();
     openLightbox(zoomTarget.dataset.lightbox);
+  };
+  // Guia de área segura do Shorts (checkbox recriado a cada render: delegação)
+  root.onchange = (e) => {
+    if (e.target && e.target.id === 'tSafeZone') {
+      state.safeZone = e.target.checked;
+      renderPreviewOnly();
+    }
   };
 }
 
@@ -1049,7 +1224,7 @@ function renderScorePanel() {
   ring.className = 'score-ring ' + ringClass(a.score);
   arc.style.strokeDashoffset = arcOffset(a.score);
   list.innerHTML = a.metrics.map((m) =>
-    `<li>${m.label}<span class="m-bar"><i style="width:${Math.round(m.value * 100)}%"></i></span><b>${Math.round(m.value * 100)}</b></li>`).join('');
+    `<li title="${metricHint(m.key)}">${m.label}<span class="m-bar"><i style="width:${Math.round(m.value * 100)}%"></i></span><b>${Math.round(m.value * 100)}</b></li>`).join('');
 }
 
 /* ----------------------------- EXPORTAR RELATÓRIO ----------------------------- */
@@ -1079,7 +1254,7 @@ async function exportReport() {
     g.fillStyle = '#f1f1f1';
     g.font = '700 34px Roboto, Arial, sans-serif';
     g.textAlign = 'left';
-    g.fillText('Ferick Thumb Lab — Relatório de impacto', 48, 72);
+    g.fillText('Ferick Thumb Lab — Relatório visual', 48, 72);
     g.fillStyle = '#909090';
     g.font = '400 16px Roboto, Arial, sans-serif';
     g.fillText(new Date().toLocaleString('pt-BR'), 48, 100);
@@ -1434,6 +1609,7 @@ async function runBlindTest() {
   const b = lib.find((x) => x.id === (state.abSel && state.abSel.b)) || lib[1];
   state.abSel = { a: a.id, b: b.id };
   state.blind = null;
+  state.blindOpen = true; // abre o teste cego na página Comparar A/B
   ensureAB(a, b);
   if (state.tab !== 'compare') { state.tab = 'compare'; syncHash('compare', false); document.body.classList.remove('dock-open'); }
   render();
