@@ -28,7 +28,25 @@ window.HTMLCanvasElement.prototype.getContext = function () {
   });
 };
 window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,AAAA';
+// Stub de Image: dispara onload (jsdom não carrega imagens reais) para que a
+// análise (analyzeThumb) resolva e o A/B produza veredito nos testes.
+window.Image = function ImageStub() {
+  const el = window.document.createElement('img');
+  el.crossOrigin = null;
+  let _src = '';
+  Object.defineProperty(el, 'src', {
+    configurable: true,
+    get: () => _src,
+    set(v) {
+      _src = v;
+      setTimeout(() => { if (typeof el.onload === 'function') el.onload(); }, 0);
+    }
+  });
+  return el;
+};
 window.scrollTo = () => {};
+// Evita que o download do relatório (anchor com data URL) tente navegar no jsdom.
+window.HTMLAnchorElement.prototype.click = function () {};
 window.HTMLElement.prototype.scrollIntoView = function () {};
 window.onerror = (msg) => errors.push('window.onerror: ' + msg);
 
@@ -239,6 +257,47 @@ assert($('#viewRoot').innerHTML.includes('px reais'), 'etiqueta de px reais pres
 $('#tTrueScale').checked = false;
 $('#tTrueScale').dispatchEvent(new window.Event('change', { bubbles: true }));
 assert(!$('#viewRoot').innerHTML.includes('true-scale'), 'desligar escala real remove a classe');
+
+// 21. A/B de verdade: com 2 thumbs o veredito é calculado automaticamente
+$('#demoBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true })); // garante 2 thumbs
+await new Promise((r) => setTimeout(r, 60));
+$('.side-item[data-goto="compare"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((r) => setTimeout(r, 150)); // análise assíncrona (Image stub dispara onload)
+assert($('#viewRoot').innerHTML.includes('Comparar A/B'), 'aba Comparar renderiza');
+assert($$('#viewRoot .ab-col').length === 2, 'comparador mostra 2 colunas A/B');
+assert($('#selA').value !== $('#selB').value, 'A e B apontam para thumbnails diferentes');
+const verdictNow = $('#verdictBox') ? $('#verdictBox').textContent : '';
+assert(/Vencedora|Empate/.test(verdictNow), 'veredito A/B calculado automaticamente');
+
+// 21b. Teste cego: mostra duas opcoes ocultas e registra o voto
+assert($$('#viewRoot .blind-card').length === 2, 'teste cego mostra 2 candidatos ocultos');
+const pickCard = $('#viewRoot .blind-card[data-pick="left"]');
+if (pickCard) {
+  pickCard.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 60));
+  assert($('#viewRoot').innerHTML.includes('Era a vers'), 'voto cego revela qual versao era');
+}
+
+// 21c. Botao "Calcular vencedor agora" existe quando nao ha veredito
+assert($('#viewRoot').innerHTML.includes('calc-ab') || /Vencedora|Empate/.test($('#verdictBox').textContent), 'fluxo A/B tem acao de calculo');
+
+// 22. Busca "da hora": muitos resultados + ordenacao por relevancia
+$('#searchInput').value = 'thumbnail';
+$('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await new Promise((r) => setTimeout(r, 40));
+assert($$('#viewRoot .result').length >= 8, 'busca retorna grade cheia (' + $$('#viewRoot .result').length + ')');
+// busca tolerante a acento/plural
+$('#searchInput').value = 'thumbs';
+$('#searchBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await new Promise((r) => setTimeout(r, 40));
+assert($$('#viewRoot .result').length >= 1, 'busca tolerante (thumbs) retorna resultados');
+
+// 23. Shorts: imagens sem letterbox (fundo + frente) e sem sobra de template
+$('.side-item[data-goto="shorts"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((r) => setTimeout(r, 40));
+assert($$('#viewRoot .short-card').length >= 10, 'grade de shorts cheia (' + $$('#viewRoot .short-card').length + ')');
+assert($$('#viewRoot .short-thumb--fit').length >= 1, 'shorts usam enquadramento sem letterbox');
+assert(!$('#viewRoot').innerHTML.includes('} análise'), 'sem sobra de template no markup');
 
 console.log('\n==== RESULTADO ====');
 if (errors.length) {

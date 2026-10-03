@@ -494,7 +494,7 @@ function shortCard(item) {
   const fb = item.fb != null ? ` data-fb="${item.fb}" onerror="thumbErrorHandler(this)"` : '';
   return `<article class="short-card ${own} ${dim}" data-id="${item.id}">
       <div class="short-thumb short-thumb--fit" data-lightbox="${item.thumb}">
-        <img class="short-bg" src="${item.thumb}" alt="" aria-hidden="true"${fb} />
+        <img class="short-bg" src="${item.thumb}" alt="" aria-hidden="true" loading="lazy" />
         <img class="short-fg" src="${item.thumb}" alt="${esc(item.title)}" loading="lazy"${fb} />
         <div class="short-tools">
           <button class="round-tool" data-action="zoom" data-src="${item.thumb}" title="Ver imagem">${ICON.expand}</button>
@@ -676,8 +676,12 @@ function viewCompare() {
   }
   const selA = $('#selA') ? $('#selA').value : (state.abSel && state.abSel.a) || '';
   const selB = $('#selB') ? $('#selB').value : (state.abSel && state.abSel.b) || '';
-  const a = lib.find((t) => t.id === selA) || lib[0];
-  const b = lib.find((t) => t.id === selB) || lib[1];
+  let a = lib.find((t) => t.id === selA) || lib[0];
+  let b = lib.find((t) => t.id === selB) || lib[1];
+  // Garante dois candidatos DIFERENTES (o comparador nunca deve apontar A e B
+  // para a mesma thumbnail, senão o veredito e o teste cego somem).
+  if (a.id === b.id) b = lib.find((t) => t.id !== a.id) || lib[1];
+  if (a.id === b.id) a = lib[0];
   state.abSel = { a: a.id, b: b.id };
   ensureAB(a, b);
   return `
@@ -753,7 +757,7 @@ function abColumn(tag, entry, analysis) {
       <div class="ab-thumb" data-lightbox="${entry.src}"><img src="${entry.src}" alt="Candidato ${tag}" onerror="userThumbErrorHandler(this)" /></div>
       ${state.hideTitle ? '' : `<h4 class="card-title" style="font-size:14px">${titleHTML((entry.title || state.meta.title) + ` (${tag})`)}</h4>`}
       <div class="ab-metrics">
-        ${metrics.map((m) => `<div class="row"><span>${m.label}</span><b>${Math.round(m.value * 100)}</b></div>`).join('') || '<div class="row"><span class="ab-loading">Analisando thumbnail...</span></div>'} análise…</span></div>'}
+        ${metrics.map((m) => `<div class="row"><span>${m.label}</span><b>${Math.round(m.value * 100)}</b></div>`).join('') || '<div class="row"><span class="ab-loading">Analisando thumbnail…</span></div>'}
       </div>
       <div class="tile-actions" style="display:flex;gap:8px;margin-top:12px">
         <button class="mini-btn" data-action="use-thumb" data-id="${entry.id}">Usar como ativa</button>
@@ -764,11 +768,10 @@ function abColumn(tag, entry, analysis) {
 }
 
 function verdictHTML() {
-  if (state.abLoading) return '<b>Analisando thumbnails...</b> o veredito aparece sozinho.';
+  if (state.abLoading) return '<b>Analisando thumbnails…</b> o veredito aparece sozinho.';
   if (!state.compare) return '<button class="mini-btn primary" data-action="calc-ab" style="max-width:280px">Calcular vencedor agora</button>';
-  if (!state.compare) return 'Calcule o score para ver o veredito automático.';
   const { a, b, winner } = state.compare;
-  if (winner === 'empate') return '<b>Empate tecnico.</b> as duas pontuaram igual — mude uma variavel (texto, rosto, contraste) e compare de novo.';
+  if (winner === 'empate') return '<b>Empate técnico.</b> As duas pontuaram igual — mude uma variável (texto, rosto, contraste) e compare de novo.';
   const win = winner === 'A' ? a : b;
   const lose = winner === 'A' ? b : a;
   const diff = Math.abs(a.score - b.score);
@@ -1283,8 +1286,17 @@ function syncSelects() {
   if (state.abSel) {
     if (state.library.some((x) => x.id === state.abSel.a)) a.value = state.abSel.a;
     if (state.library.some((x) => x.id === state.abSel.b)) b.value = state.abSel.b;
-  } else if (state.library.length > 1) {
-    state.abSel = { a: state.library[0].id, b: state.library[1].id };
+  }
+  // Nunca deixa A e B apontarem para a mesma thumbnail.
+  if (state.library.length > 1 && a.value === b.value) {
+    const other = state.library.find((x) => x.id !== a.value);
+    if (other) b.value = other.id;
+  }
+  // Inicializa a seleção A/B com dois candidatos distintos.
+  if (!state.abSel && state.library.length > 1) {
+    state.abSel = { a: a.value || state.library[0].id, b: b.value || state.library[1].id };
+  } else if (state.abSel) {
+    state.abSel = { a: a.value, b: b.value };
   }
   syncComparePanel();
 }
